@@ -8,19 +8,22 @@ class DockerManager
     private int    $ttl;
     private array  $limits;
     private string $fwChain;
+    private ?string $sessionFlag;
 
     public function __construct(
         string $id,
         string $workDir,
         int    $ttl    = 3600,
         array  $limits = [],
-        string $fwChain = 'DOCKER-USER'
+        string $fwChain = 'DOCKER-USER',
+        ?string $sessionFlag = null
     ) {
         $this->id       = $id;
         $this->workDir  = $workDir;
         $this->ttl      = $ttl;
         $this->limits   = $limits;
         $this->fwChain  = $fwChain;
+        $this->sessionFlag = $sessionFlag;
     }
 
     public function buildAndRun(array $buildInfo): array
@@ -78,22 +81,20 @@ class DockerManager
     {
         $sec = $this->ttl;
 
-        // 1) stop & remove containers / stacks
-        if (count($cids) > 1) {   // compose
-            $down = 'docker compose -p '.escapeshellarg($this->id).' down -v --remove-orphans';
-        } else {                  // single
-            $down = 'docker rm -fv '.escapeshellarg($this->id);
-        }
+        $down = count($cids) > 1
+            ? 'docker compose -p '.escapeshellarg($this->id).' down -v --remove-orphans'
+            : 'docker rm -fv '.escapeshellarg($this->id);
 
-        // 2) close firewall holes
         $fw  = '';
         foreach ($ports as $p) {
             $fw .= sprintf('iptables -D %s -p tcp --dport %d -j ACCEPT;',
                            escapeshellarg($this->fwChain), (int)$p['hostPort']);
         }
 
-        // 3) spawn the sleeper
-        $cmd = sprintf('(sleep %d && %s %s) >/dev/null 2>&1 &', $sec, $down, $fw);
+        $flag = $this->sessionFlag ? 'rm -f '.escapeshellarg($this->sessionFlag) : '';
+
+        $cmd = sprintf('(sleep %d && %s %s %s) >/dev/null 2>&1 &',
+                       $sec, $down, $fw, $flag);
         shell_exec($cmd);
     }
 

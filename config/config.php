@@ -16,6 +16,8 @@ return [
     ],
 
     // maybe INPUT only for --network host ?
-    // not sure yet
     'firewall_chain' => 'DOCKER-USER',
+
+    // max container per on the php session opened
+    'max_per_session'       => 3,
 ];

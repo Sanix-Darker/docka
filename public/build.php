@@ -4,6 +4,8 @@ use App\Sandbox;
 
 header('Content-Type: application/json');
 
+session_start();
+
 require __DIR__ . '/../vendor/autoload.php';
 $config = require __DIR__ . '/../config/config.php';
 
@@ -15,7 +17,7 @@ try {
     }
     Sandbox::cleanup($config['build_root'], $config['ttl_minutes']);
 
-    $sb   = new Sandbox($repo, $config);
+    $sb   = new Sandbox($repo, $config, session_id());
     $out  = $sb->run();          // ['log'=>..., 'ports'=>[]]
 
     echo json_encode([
