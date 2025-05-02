@@ -54,7 +54,7 @@ class Sandbox
         return $out;
     }
 
-    /** my custom garbage collector for old workdirs – unchanged */
+    /** my custom garbage collector for old workdirs */
     public static function cleanup(string $root, int $ttlMinutes): void
     {
         foreach (glob("$root/*") as $dir) {

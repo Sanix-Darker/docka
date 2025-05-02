@@ -49,7 +49,8 @@ class DockerManager
         $flags = [];
         if (!empty($this->limits['memory']))  $flags[] = '--memory='.escapeshellarg($this->limits['memory']);
         if (!empty($this->limits['cpus']))    $flags[] = '--cpus='.escapeshellarg($this->limits['cpus']);
-        if (!empty($this->limits['storage'])) $flags[] = '--storage-opt size='.escapeshellarg($this->limits['storage']);
+        // FIXME: will still investigate why this does no work properly
+        // if (!empty($this->limits['storage'])) $flags[] = '--storage-opt size='.escapeshellarg($this->limits['storage']);
         if (!$flags) return;
 
         foreach ($cids as $cid) {

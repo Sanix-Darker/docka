@@ -18,7 +18,7 @@ try {
     Sandbox::cleanup($config['build_root'], $config['ttl_minutes']);
 
     $sb   = new Sandbox($repo, $config, session_id());
-    $out  = $sb->run();          // ['log'=>..., 'ports'=>[]]
+    $out  = $sb->run();
 
     echo json_encode([
         'ok'    => true,

@@ -12,7 +12,8 @@ return [
     'limits' => [
         'memory'  => '512m',   // e.g. '512m', '2g', null = unlimited
         'cpus'    => '0.50',   // 0.5 CPU ⇒ 50 % of 1 core
-        'storage' => '1G',     // 1 GiB writable layer (needs devicemapper or fuse-overlayfs)
+        // FIXME: will still investigate why this does no work properly
+        //'storage' => '1G',     // 1 GiB writable layer (needs devicemapper or fuse-overlayfs)
     ],
 
     // maybe INPUT only for --network host ?
