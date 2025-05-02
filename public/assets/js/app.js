@@ -50,11 +50,11 @@ document.addEventListener('DOMContentLoaded', () => {
     els.cards.insertAdjacentHTML('afterbegin', `
       <div class="card">
         <h2>Build #${id}</h2>
-        <details class="log-box" open>
+        <details class="log-box">
           <summary>
-            Logs <span class="status-text">⏳ Building…</span>
+            Logs <span class="status-text">⏳ Building… click to expand/close…</span>
           </summary>
-          <pre class="log">Click to expand/close…\n</pre>
+          <pre class="log"></pre>
         </details>
         <canvas width="400" height="160" class="chart"></canvas>
         <button class="close">✖ Close</button>
