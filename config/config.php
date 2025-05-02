@@ -20,5 +20,5 @@ return [
     'firewall_chain' => 'DOCKER-USER',
 
     // max container per on the php session opened
-    'max_per_session'       => 30,
+    'max_per_session'       => 3,
 ];
