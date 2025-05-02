@@ -14,6 +14,7 @@ Build, test and run any public repo that ships a `docker-compose.yml` or `Docker
 * Linux (or WSL) with **Docker ≥ 24** and **docker compose** plugin
 * PHP 8.1+ with `proc_open`, `shell_exec` enabled
 * `git`
+- should be started on root (for obvious networking priviledges)
 
 ## RUN LOCALLY
 
