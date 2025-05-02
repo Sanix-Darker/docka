@@ -20,7 +20,8 @@ class Sandbox
             $this->id,
             $this->workDir,
             $cfg['container_ttl_seconds'] ?? 3600, // 1heure max
-            $cfg['limits'] ?? []  // for specs per containers
+            $cfg['limits'] ?? [],  // for specs per containers
+            $cfg['firewall_chain'] ?? 'DOCKER-USER' // still not sure on using INPUT instead
         );
     }
 

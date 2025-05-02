@@ -14,4 +14,8 @@ return [
         'cpus'    => '0.50',   // 0.5 CPU ⇒ 50 % of 1 core
         'storage' => '1G',     // 1 GiB writable layer (needs devicemapper or fuse-overlayfs)
     ],
+
+    // maybe INPUT only for --network host ?
+    // not sure yet
+    'firewall_chain' => 'DOCKER-USER',
 ];
