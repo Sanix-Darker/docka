@@ -24,6 +24,7 @@ try {
         'ok'    => true,
         'log'   => $out['log'],
         'ports' => $out['ports'],
+        'containerIds' => $out['containerIds'],
     ]);
 } catch (Throwable $exception) {
     echo json_encode([
