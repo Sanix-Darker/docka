@@ -40,7 +40,7 @@ class DockerManager
         $this->openPorts($result['ports']);
         $this->scheduleCleanup($cids, $result['ports']);
 
-        return $result;
+        return array_merge($result, ['containerIds'=>$cids]);
     }
 
     // for LIMITS

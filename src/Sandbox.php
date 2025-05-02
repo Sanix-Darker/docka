@@ -13,8 +13,12 @@ class Sandbox
     private RepositoryManager $repo;
     private DockerManager     $docker;
 
-    public function __construct(string $repoUrl, array $cfg, string $sessionId)
-    {
+    public function __construct(
+        string $repoUrl,
+        array $cfg,
+        string $sessionId,
+        ?string $ref = null
+    ) {
         $this->cfg       = $cfg;
         $this->sessionId = preg_replace('/[^a-zA-Z0-9]/', '_', $sessionId);
         $this->id        = Utils::uuid();
@@ -30,7 +34,7 @@ class Sandbox
         }
         $this->sessionFile = $sesDir . '/' . $this->id . '.flag';
 
-        $this->repo   = new RepositoryManager($repoUrl, $this->workDir);
+        $this->repo   = new RepositoryManager($repoUrl, $this->workDir, $ref);
         $this->docker = new DockerManager(
             $this->id,
             $this->workDir,

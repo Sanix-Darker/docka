@@ -6,24 +6,29 @@ class RepositoryManager
 {
     private string $workDir;
     private string $repoUrl;
+    private ?string $ref = null;
 
-    public function __construct(string $repoUrl, string $workDir)
-    {
+    public function __construct(
+        string $repoUrl,
+        string $workDir,
+        ?string $ref = null
+    ) {
         $this->repoUrl = $repoUrl;
         $this->workDir = $workDir;
+        $this->ref     = $ref;
     }
 
     public function clone(): void
     {
-        Utils::sh(sprintf(
-            'git clone --depth 1 %s %s 2>&1',
+        $cmd = [
+            'git', 'clone',
+            '--depth', '1',
+            $this->ref ? '--branch '.escapeshellarg($this->ref) : '',
             escapeshellarg($this->repoUrl),
             escapeshellarg($this->workDir)
-        ), $out);
-
-        if (!is_dir($this->workDir)) {
-            throw new \RuntimeException("Clone failed:\n$out");
-        }
+        ];
+        Utils::sh(implode(' ', array_filter($cmd)), $out);
+        if (!is_dir($this->workDir)) throw new \RuntimeException("Clone failed:\n$out");
     }
 
     public function locateBuildFile(): ?array
