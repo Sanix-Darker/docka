@@ -1,0 +1,36 @@
+input  { width: 400px; padding: 0.3rem; }
+button { padding: 0.4rem 0.8rem; }
+pre    { background: #111; color:#0f0; padding:1rem; overflow:auto; max-height:60vh; }
+
+/* full-height page so flexbox can do its job */
+html, body {
+    height: 100%;
+    margin: 0;
+}
+
+body {
+    margin: 2rem;
+    display: flex;
+    flex-direction: column;
+    font-family: system-ui, sans-serif;
+}
+
+form {
+    padding: 1rem;
+    flex: 0 0 auto;
+}
+
+/* LOG PANE ──────────────────────────────────────────────── */
+#log {
+    flex: 1 1 auto;          /* <- stretches to fill leftover space */
+    overflow-y: auto;        /* scrolls inside, not the whole page  */
+    background: #111;
+    color: #0f0;
+    font-family: monospace;
+    padding: 1rem;
+    white-space: pre-wrap;   /* wrap long lines, preserve \n        */
+}
+
+/* optional: thinner scrollbar for a “terminal” feel            */
+#log::-webkit-scrollbar        { width: 6px; }
+#log::-webkit-scrollbar-thumb  { background: #444; }
