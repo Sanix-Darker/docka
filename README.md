@@ -2,10 +2,12 @@
 
 Build, test and run any public repo that ships a `docker-compose.yml` or `Dockerfile` in the project tree.
 
+![screen](./scr.png)
+
 ## DISCLAIMER
 
-This is for tests purposes only...
-I made it to run containers only after 1h...
+- This is for tests purposes only...
+- I made it to run containers only after 1h...
 
 ## PREREQUISITES
 
@@ -21,17 +23,17 @@ cd docka
 php -S 0.0.0.0:7711 -t public
 ```
 
-*NOTE:* I tried the DinD (Docker In Docker) version... but it's not working yet as i wish...
+**NOTE:** I tried the DinD (Docker In Docker) version... but it's not working yet as i wish...
 
-*NOTE2:* Consider the config.php (if you want to deploy docka for yourself...)
+**NOTE2:** Consider the config.php (if you want to deploy docka for yourself...)
 
-## so, HOW I MADE IT WORKS INSIDE
+## HOW I MADE IT WORKS INSIDE
 
-1. **index.php** renders the single-page form.
+1. **index.php** renders the single-page form (with the terminal logs).
 2. The JS posts to **build.php**.
 3. `build.php` spins up a `Sandbox` object:
    * clones the repo → `builds/<id>/` (because i needed the version of the project before the build)
-   * locates Compose or Dockerfile
+   * locates Compose or Dockerfile from the proejct tree,
    * uses **DockerManager** to build & run it...
    * captures logs and published ports (so that it can be access by anyone...)
 
