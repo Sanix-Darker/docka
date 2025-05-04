@@ -4,7 +4,7 @@ declare(strict_types=1);
 set_time_limit(0);                 // keep the script alive
 ini_set('output_buffering', 'off');
 ini_set('zlib.output_compression', '0');
-ob_implicit_flush(1);
+ob_implicit_flush(true);
 
 $config = require __DIR__.'/../config/config.php';
 $root   = rtrim($config['build_root'], '/').'/';

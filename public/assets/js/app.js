@@ -19,6 +19,8 @@ document.addEventListener('DOMContentLoaded', () => {
         els.cards.insertAdjacentHTML('afterbegin', `
       <div class="card">
         <h2>Build #${id}</h2>
+        <nav class="service"></nav>
+        <hr/>
         <details class="log-box" open>
           <summary>
             Logs <span class="status-text">⏳ Building… click to expand/close…</span>
@@ -29,8 +31,8 @@ document.addEventListener('DOMContentLoaded', () => {
         <canvas class="chart" width="400" height="150"></canvas>
 
         <div class="actions">
-          <button class="stop">⏹ Stop</button>
-          <button class="close">✖</button>
+          <button class="stop">-Stop</button>
+          <button class="close">✖Close</button>
         </div>
       </div>`);
         const card = els.cards.firstElementChild;
@@ -40,11 +42,45 @@ document.addEventListener('DOMContentLoaded', () => {
             card,
             status: card.querySelector('.status-text'),
             logEl: card.querySelector('.log'),
+            serviceEl: card.querySelector('.service'),
             ctx: card.querySelector('.chart').getContext('2d'),
             stopBt: card.querySelector('.stop'),
             clsBt: card.querySelector('.close')
         };
     };
+
+
+    const POLL_INTERVAL = 1000;
+    let logPos = 0;
+    function startLogPolling(logEl, sandboxId) {
+      async function poll() {
+        try {
+          const r = await fetch(
+            `/tail.php?sid=${encodeURIComponent(sandboxId)}&pos=${logPos}`,
+            { cache: 'no-store' }          // never allow cached answers
+          );
+
+          if (r.status === 204) {
+            /* nothing new – just wait for the next round */
+          } else if (r.ok) {
+            const { pos, lines } = await r.json();
+            logPos = pos;
+            for (const line of lines) {
+              logEl.textContent += line + '\n';
+            }
+            logEl.scrollTop = logEl.scrollHeight;
+          } else {
+            console.error('[log‑poll] HTTP', r.status, await r.text());
+          }
+        } catch (err) {
+          console.error('[log‑poll] network error', err);
+        } finally {
+          /* schedule the next request */
+          setTimeout(poll, POLL_INTERVAL);
+        }
+      }
+      poll();
+    }
 
     const buildChart = ctx => new Chart(ctx, {
         type: 'line',
@@ -103,6 +139,7 @@ document.addEventListener('DOMContentLoaded', () => {
             card,
             status,
             logEl,
+            serviceEl,
             ctx,
             stopBt,
             clsBt
@@ -112,6 +149,7 @@ document.addEventListener('DOMContentLoaded', () => {
             card,
             status,
             logEl,
+            serviceEl,
             ctx,
             stopBt,
             clsBt
@@ -128,16 +166,7 @@ document.addEventListener('DOMContentLoaded', () => {
             console.log("response: ", res);
             if (!res.ok) throw new Error(res.error || 'Build failed');
 
-            const es = new EventSource(`/stream.php?sid=${encodeURIComponent(res.sandboxId)}`);
-            es.onmessage = (e) => {
-              logEl.textContent += e.data + '\n';
-              logEl.scrollTop = logEl.scrollHeight;
-            };
-            es.onerror = (e) => {
-              console.error('[SSE] error', e);
-              if (es.readyState === EventSource.CLOSED)
-                console.warn('[SSE] stream closed');
-            };
+            startLogPolling(logEl, res.sandboxId);
 
             const chart = buildChart(ctx);
             const pollId = pollStats(res.containerIds[0], chart);
@@ -147,21 +176,21 @@ document.addEventListener('DOMContentLoaded', () => {
                 await fetch(`/stop.php?sid=${res.sandboxId}`);
             };
             clsBt.onclick = () => {
-                es.close();
+                //es.close();
                 clearInterval(pollId);
                 card.remove();
             };
 
             status.textContent = '✔ Done';
             if (res.ports?.length) {
-                logEl.textContent += '— services —\n';
+                serviceEl.textContent += '— services —\n';
                 res.ports.forEach((p) =>
                     // we post the service only if the port is available
-                    p.hostPort && (logEl.textContent += `${p.service}\n → http://${location.hostname}:${p.hostPort}\n`)
+                    p.hostPort && (serviceEl.innerHTML += `<br/> → <small><a href="http://${location.hostname}:${p.hostPort}" target="_blank">${p.service.substring(0,5)}:${p.hostPort}</a></small>\n`)
                 );
             }
         } catch (e) {
-            logEl.textContent += `❌ ${e.message}`;
+            serviceEl.textContent += `❌ ${e.message}`;
             console.log(`Error: ${e.message}`, true);
         } finally {
             setLoading(false);
@@ -175,4 +204,34 @@ document.addEventListener('DOMContentLoaded', () => {
         }
         build();
     };
+
+    // For cards enhances
+    const box   = document.getElementById('sandboxes');
+    let dragged = null;
+
+    /* Make every card draggable (in case the attribute is missing) */
+    box.querySelectorAll('.card').forEach(c => c.setAttribute('draggable', true));
+    box.addEventListener('dragstart', e=>{
+      if (e.target.classList.contains('card')){
+        dragged = e.target;
+        e.target.classList.add('dragging');
+        e.dataTransfer.effectAllowed='move';
+      }
+    });
+    box.addEventListener('dragend', e=>{
+      if (e.target.classList.contains('card')){
+        e.target.classList.remove('dragging');
+        dragged = null;
+      }
+    });
+    /* reorder while hovering other cards */
+    box.addEventListener('dragover', e=>{
+      e.preventDefault();                                         // allow drop
+      const cards = [...box.querySelectorAll('.card:not(.dragging)')];
+      const next  = cards.find(card=>{
+        const r = card.getBoundingClientRect();
+        return e.clientY < r.top + r.height/2;                    // above centre?
+      });
+      box.insertBefore(dragged, next || null);                    // null → append
+    });
 });
