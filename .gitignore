@@ -2,3 +2,5 @@
 /.env
 .DS_Store
 /builds/*
+/logs/
+/public/log.txt

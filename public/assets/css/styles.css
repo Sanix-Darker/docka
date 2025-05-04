@@ -51,7 +51,7 @@ h1 {
 }
 
 h1::before {
-  content: ">";
+  /*content: ">";*/
   font-size: 1.25rem;
   opacity: 0.8;
 }
@@ -108,7 +108,7 @@ label {
 input[type="url"] {
   width: 100%;
 }
-input[type="url"], input[type="text"] {
+input[type="url"], input[type="text"], textarea {
   padding: 0.5rem 0.75rem;
   background-color: var(--terminal-bg);
   color: var(--text-color);
@@ -296,15 +296,49 @@ input[type="url"]:focus {
   display: none;
 }
 
-#sandboxes { display:flex; flex-wrap:wrap; gap:1rem; }
-.card {
-    border:1px solid #333; padding:1rem; width:420px; background:#0b0b0b; color:#0f0;
-    position:relative; display:flex; flex-direction:column;
+#sandboxes{
+  display:flex;
+  flex-wrap:wrap;
+  gap:1rem;
+  align-items:flex-start;                 /* cards keep independent heights  */
 }
-.card h2  { margin:0 0 .5rem 0; font-size:1rem; color:#fff; }
-.card .log { flex:1 1 auto; overflow:auto; background:#111; padding:.5rem; margin-bottom:.5rem; }
-.card .close { position:absolute; top:4px; right:4px; background:none; border:none; color:#888; cursor:pointer; }
-.card canvas { background:#000; margin-bottom:.5rem; }
+#sandboxes .card{
+  padding:1rem;
+  width:389px;                             /* hard cap so they never exceed  */
+  flex:1 1 calc(33.333% - 1rem);           /* ≤ 3 cards per row              */
+  max-width:389px;
+  background:#0b0b0b;
+  color:#0f0;
+  position:relative;
+  display:flex;
+  flex-direction:column;
+  border-radius:6px;
+  transition:transform .2s ease, box-shadow .2s ease;
+  user-select:none;
+  cursor:grab;                             /* hand cursor                     */
+}
+/* If the wrapper holds **only one** card, let it stretch full‑width */
+#sandboxes > .card:only-child{
+  flex-basis:100%;
+  max-width:100%;
+}
+/* Hover zoom + drop‑shadow */
+#sandboxes .card:hover{
+  transform:scale(1.003);
+  box-shadow:0 10px 24px rgba(0,0,0,.5);
+  z-index:10;
+}
+/* Visual cue while dragging */
+#sandboxes .card.dragging{
+  opacity:.8;
+  cursor:grabbing;
+}
+/* — Keep your original inner styles (copied here for clarity) — */
+#sandboxes .card h2  {margin:0 0 .5rem 0;font-size:1rem;color:#fff}
+#sandboxes .card .log{flex:1 1 auto;overflow:auto;background:#111;padding:.5rem;margin-bottom:.5rem}
+#sandboxes .card canvas{background:#000;margin-bottom:.5rem}
+#sandboxes .card .close,
+#sandboxes .card .stop{background:none;border: 1px solid white;color:#888;cursor:pointer}
 
 /* full-height page so flexbox can do its job */
 html, body {

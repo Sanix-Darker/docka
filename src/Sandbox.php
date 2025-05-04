@@ -9,15 +9,20 @@ class Sandbox
     private string $workDir;
     private string $sessionId;
     private string $sessionFile;
+    private string $sessionLog;
     private array  $cfg;
     private RepositoryManager $repo;
     private DockerManager     $docker;
+
+    private ?string $ref;
+    private ?string $envRaw;
 
     public function __construct(
         string $repoUrl,
         array $cfg,
         string $sessionId,
-        ?string $ref = null
+        ?string $ref = null,
+        ?string $envRaw = null,
     ) {
         $this->cfg       = $cfg;
         $this->sessionId = preg_replace('/[^a-zA-Z0-9]/', '_', $sessionId);
@@ -27,6 +32,10 @@ class Sandbox
 
         $sesDir = $this->root . '/sessions/' . $this->sessionId;
         if (!is_dir($sesDir)) mkdir($sesDir, 0777, true);
+
+        $this->sessionLog = $sesDir . '/_general.log';
+        if (!is_file($this->sessionLog)) file_put_contents($this->sessionLog, '');
+
         $active = glob("$sesDir/*");
         $max    = $cfg['max_per_session'] ?? 3;
         if (count($active) >= $max) {
@@ -34,6 +43,7 @@ class Sandbox
         }
         $this->sessionFile = $sesDir . '/' . $this->id . '.flag';
 
+        $this->envRaw = $envRaw;
         $this->repo   = new RepositoryManager($repoUrl, $this->workDir, $ref);
         $this->docker = new DockerManager(
             $this->id,
@@ -41,13 +51,16 @@ class Sandbox
             $cfg['container_ttl_seconds'] ?? 3600,
             $cfg['limits']               ?? [],
             $cfg['firewall_chain']       ?? 'DOCKER-USER',
-            $this->sessionFile
+            $this->sessionFile,
+            $this->workDir.'/.env',
+            $this->sessionLog
         );
     }
 
     public function run(): array
     {
         $this->repo->clone();
+        $this->prepareEnvFile();
         $buildInfo = $this->repo->locateBuildFile();
         if (!$buildInfo) throw new \RuntimeException('No Dockerfile nor docker-compose.yml found');
 
@@ -58,6 +71,30 @@ class Sandbox
         return $out;
     }
 
+    public function getId(): string
+    {
+        return $this->id;
+    }
+
+    private function prepareEnvFile(): void
+    {
+        $envPath = $this->workDir.'/.env';
+
+        if ($this->envRaw && trim($this->envRaw) !== '') {
+            file_put_contents($envPath, $this->envRaw);
+            return;
+        }
+
+        if (is_file($envPath)) return;
+
+        foreach (['.env.example', '.env-example', '.env.sample'] as $tpl) {
+            $src = $this->workDir.'/'.$tpl;
+            if (is_file($src)) {
+                copy($src, $envPath);
+                return;
+            }
+        }
+    }
     /** my custom garbage collector for old workdirs */
     public static function cleanup(string $root, int $ttlMinutes): void
     {
