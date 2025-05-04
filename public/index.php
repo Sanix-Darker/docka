@@ -15,21 +15,29 @@ $config = require __DIR__ . '/../config/config.php';
 <body>
   <div class="container">
     <header>
-      <h1>DOCKA -- <small>Test any public repository with a dockerfile/docker-compose.yml in it</small></h1>
+      <h1><span class="blinking-cursor"></span> DOCKA</h1>
+      <i><b><small>Test any public git repository with a dockerfile/docker-compose.yml in it.(github/gitlab/bitucket)</small></b></i>
     </header>
 
     <form id="build-form">
       <div class="form-group">
         <div class="input-wrapper">
           <input type="url" id="repo-url" name="repo" required
+                value="https://github.com/Sanix-Darker/test-docker-project"
                 placeholder="https://github.com/sanix-darker/"
                 aria-describedby="url-hint">
-          <input type="text" name="ref" placeholder="master OR v1.2.3">
+          <input type="text" name="ref" value="master" placeholder="master OR v1.2.3">
         </div>
       </div>
+
+      <details>
+        <summary style="cursor: pointer">.env overrides (optional) [click to expand/close]</summary>
+        <textarea id="env-text" name="env" rows="6" style="width:100%" spellcheck="false"></textarea>
+      </details>
+
       <div style="display: flex; justify-content: flex-end;">
         <button type="submit" id="submit-btn" class="btn">
-          Build and Test
+          Build and Run
         </button>
       </div>
     </form>
@@ -37,6 +45,7 @@ $config = require __DIR__ . '/../config/config.php';
     <!-- container for many sandboxes -->
     <div id="sandboxes"></div>
 
+<!--
     <div class="terminal">
       <div class="terminal-header">
         <span>General Output</span>
@@ -50,6 +59,7 @@ $config = require __DIR__ . '/../config/config.php';
         <ul id="service-links"></ul>
       </div>
     </div>
+-->
   </div>
 
   <script src="assets/js/app.js"></script>

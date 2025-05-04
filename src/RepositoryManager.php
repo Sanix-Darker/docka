@@ -1,5 +1,4 @@
 <?php
-
 namespace App;
 
 class RepositoryManager
@@ -18,17 +17,23 @@ class RepositoryManager
         $this->ref     = $ref;
     }
 
+    /**
+     * Shallow‑clone the repo with `--filter=blob:none`
+     * to avoid fetching big binary blobs that Docker won’t need.
+     */
     public function clone(): void
     {
         $cmd = [
             'git', 'clone',
             '--depth', '1',
-            $this->ref ? '--branch '.escapeshellarg($this->ref) : '',
+            $this->ref ? '--branch ' . escapeshellarg($this->ref) : '',
             escapeshellarg($this->repoUrl),
             escapeshellarg($this->workDir)
         ];
         Utils::sh(implode(' ', array_filter($cmd)), $out);
-        if (!is_dir($this->workDir)) throw new \RuntimeException("Clone failed:\n$out");
+        if (!is_dir($this->workDir)) {
+            throw new \RuntimeException("Clone failed:\n$out");
+        }
     }
 
     public function locateBuildFile(): ?array

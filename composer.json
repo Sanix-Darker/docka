@@ -1,6 +1,11 @@
 {
     "name": "sanix-darker/docka",
     "description": "Build and deploy any public github / gitlab repo that have Dockerfile or docker-compose.yml",
+    "scripts": {
+      "serve": [
+        "php -d display_errors=1 -d display_startup_errors=1 -d log_errors=1 -d error_reporting=E_ALL -d error_log=php://stdout -S 0.0.0.0:7711 -t public"
+      ]
+    },
     "type": "project",
     "license": "MIT",
     "autoload": {
@@ -14,5 +19,8 @@
             "email": "s4nixd@gmail.com"
         }
     ],
-    "require": {}
+    "require": {
+        "illuminate/collections": "^12.12",
+        "symfony/yaml": "^7.2"
+    }
 }

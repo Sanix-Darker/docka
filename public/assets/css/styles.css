@@ -51,7 +51,7 @@ h1 {
 }
 
 h1::before {
-  content: ">";
+  /*content: ">";*/
   font-size: 1.25rem;
   opacity: 0.8;
 }
@@ -108,7 +108,7 @@ label {
 input[type="url"] {
   width: 100%;
 }
-input[type="url"], input[type="text"] {
+input[type="url"], input[type="text"], textarea {
   padding: 0.5rem 0.75rem;
   background-color: var(--terminal-bg);
   color: var(--text-color);
@@ -298,7 +298,7 @@ input[type="url"]:focus {
 
 #sandboxes { display:flex; flex-wrap:wrap; gap:1rem; }
 .card {
-    border:1px solid #333; padding:1rem; width:420px; background:#0b0b0b; color:#0f0;
+    border:1px solid #333; padding:1rem; width:389px; background:#0b0b0b; color:#0f0;
     position:relative; display:flex; flex-direction:column;
 }
 .card h2  { margin:0 0 .5rem 0; font-size:1rem; color:#fff; }
