@@ -1,237 +1,323 @@
-document.addEventListener('DOMContentLoaded', () => {
-    const els = {
-        form: document.getElementById('build-form'),
-        repoInput: document.getElementById('repo-url'),
-        submitBtn: document.getElementById('submit-btn'),
-        cards: document.getElementById('sandboxes')
-    };
+/**
+ * Return the current PHP session id (or "anon" if none found).
+ * @returns {string}
+ */
+const getSessionId = () => {
+  const match = document.cookie.match(/PHPSESSID=([^;]+)/);
+  return match ? decodeURIComponent(match[1]) : 'anon';
+};
 
-    let buildSeq = 0;
-    const setLoading = (flag) => {
-        els.submitBtn.disabled = flag;
-        els.submitBtn.innerHTML = flag ?
-            '<span class="spinner"></span> Building…' :
-            'Build and Run';
-    };
-
-    const createCard = () => {
-        const id = ++buildSeq;
-        els.cards.insertAdjacentHTML('afterbegin', `
-      <div class="card">
-        <h2>Build #${id}</h2>
-        <nav class="service"></nav>
-        <hr/>
-        <details class="log-box" open>
-          <summary>
-            Logs <span class="status-text">⏳ Building… click to expand/close…</span>
-          </summary>
-          <pre class="log"></pre>
-        </details>
-
-        <canvas class="chart" width="400" height="150"></canvas>
-
-        <div class="actions">
-          <button class="stop">-Stop</button>
-          <button class="close">✖Close</button>
-        </div>
-      </div>`);
-        const card = els.cards.firstElementChild;
-        // this is also handled aferwards but we should always be able to remove an ongoing card
-        card.querySelector('.close').onclick = () => card.remove();
-        return {
-            card,
-            status: card.querySelector('.status-text'),
-            logEl: card.querySelector('.log'),
-            serviceEl: card.querySelector('.service'),
-            ctx: card.querySelector('.chart').getContext('2d'),
-            stopBt: card.querySelector('.stop'),
-            clsBt: card.querySelector('.close')
-        };
-    };
+// common const
+const LS_KEY = `docka_${getSessionId()}`;
+const LOG_POLL   = 2000;
+const STAT_POLL  = 3500;
 
 
-    const POLL_INTERVAL = 1000;
-    let logPos = 0;
-    function startLogPolling(logEl, sandboxId) {
-      async function poll() {
-        try {
-          const r = await fetch(
-            `/tail.php?sid=${encodeURIComponent(sandboxId)}&pos=${logPos}`,
-            { cache: 'no-store' }          // never allow cached answers
-          );
+/**
+ * @typedef {Object} BuildInfo
+ * @property {string} sid      – sandbox id
+ * @property {Array<{hostPort:number,service:string}>} [ports]
+ * @property {string[]} containerIds
+ */
 
-          if (r.status === 204) {
-            /* nothing new – just wait for the next round */
-          } else if (r.ok) {
-            const { pos, lines } = await r.json();
-            logPos = pos;
-            for (const line of lines) {
-              logEl.textContent += line + '\n';
-            }
-            logEl.scrollTop = logEl.scrollHeight;
-          } else {
-            console.error('[log‑poll] HTTP', r.status, await r.text());
-          }
-        } catch (err) {
-          console.error('[log‑poll] network error', err);
-        } finally {
-          /* schedule the next request */
-          setTimeout(poll, POLL_INTERVAL);
+/**
+ * Load every stored build for the current session.
+ * @returns {BuildInfo[]}
+ */
+const loadStored = () =>
+  JSON.parse(localStorage.getItem(LS_KEY) || '[]');
+
+/**
+ * Persist (or replace) a build.
+ * @param {BuildInfo} build
+ */
+const saveBuild = build => {
+  const items = loadStored().filter(b => b.sid !== build.sid);
+  items.push(build);
+  localStorage.setItem(LS_KEY, JSON.stringify(items));
+};
+
+/**
+ * Drop a build from storage.
+ * @param {string} sid
+ */
+const dropBuild = sid => {
+  const items = loadStored().filter(b => b.sid !== sid);
+  localStorage.setItem(LS_KEY, JSON.stringify(items));
+};
+
+/**
+ * POST /build.php
+ * @param {FormData} fd
+ * @returns {Promise<{
+ *   ok:boolean,
+ *   error?:string,
+ *   sandboxId:string,
+ *   ports:Array<{hostPort:number,service:string}>,
+ *   containerIds:string[]
+ * }>}
+ */
+const requestBuild = fd =>
+  fetch('/build.php', { method: 'POST', body: fd }).then(r => r.json());
+
+/**
+ * GET /stop.php
+ * @param {string} sid
+ * @returns {Promise<void>}
+ */
+const stopSandbox = sid => fetch(`/stop.php?sid=${sid}`);
+
+/**
+ * GET /stats.php
+ * @param {string} cid
+ * @returns {Promise<{cpu:number,mem:number}>}
+ */
+const fetchStats = cid =>
+  fetch(`/stats.php?cid=${cid}`, { cache: 'no-store' }).then(r => r.json());
+
+/**
+ * GET /tail.php
+ * @param {string} sid
+ * @param {number} pos
+ * @returns {Promise<{pos:number,lines:string[]} | null>} – null when 204
+ */
+const tailLogs = async (sid, pos) => {
+  const r = await fetch(
+    `/tail.php?sid=${encodeURIComponent(sid)}&pos=${pos}`,
+    { cache: 'no-store' }
+  );
+  return r.status === 204 ? null : r.json();
+};
+
+/**
+ * DOM handles used everywhere.
+ * @type {{form:HTMLFormElement,repo:HTMLInputElement,submit:HTMLButtonElement,cards:HTMLElement}}
+ */
+const els = {
+  form:   /** @type {HTMLFormElement}   */ (document.getElementById('build-form')),
+  repo:   /** @type {HTMLInputElement}  */ (document.getElementById('repo-url')),
+  submit: /** @type {HTMLButtonElement} */ (document.getElementById('submit-btn')),
+  cards:  /** @type {HTMLElement}       */ (document.getElementById('sandboxes'))
+};
+
+/**
+ * Toggle submit‑button loading state.
+ * @param {boolean} busy
+ */
+const setLoading = busy => {
+  els.submit.disabled = busy;
+  els.submit.innerHTML = busy
+    ? '<span class="spinner"></span>&nbsp;Building…'
+    : 'Build and Run';
+};
+
+let seq = 0;
+
+/**
+ * Create and insert a fresh card into the DOM.
+ * @returns {{
+ *   card:HTMLElement, status:HTMLElement, log:HTMLElement,
+ *   services:HTMLElement, ctx:CanvasRenderingContext2D,
+ *   stopBt:HTMLButtonElement, closeBt:HTMLButtonElement
+ * }}
+ */
+const createCard = () => {
+  const id = ++seq;
+  els.cards.insertAdjacentHTML(
+    'afterbegin',
+    `<div class="card">
+      <h2>Build #${id}</h2>
+      <nav class="service"></nav>
+      <hr/>
+      <details class="log-box" open>
+        <summary>Logs <span class="status-text">⏳ Building… click to expand/close…</span></summary>
+        <pre class="log"></pre>
+      </details>
+      <canvas class="chart" width="400" height="150"></canvas>
+      <div class="actions">
+        <button class="stop">-Stop</button>
+        <button class="close">✖Close</button>
+      </div>
+    </div>`
+  );
+
+  const card     = /** @type {HTMLElement} */ (els.cards.firstElementChild);
+  const stopBt   = /** @type {HTMLButtonElement} */ (card.querySelector('.stop'));
+  const closeBt  = /** @type {HTMLButtonElement} */ (card.querySelector('.close'));
+
+  closeBt.onclick = () => card.remove();
+
+  return {
+    card,
+    status:   /** @type {HTMLElement} */ (card.querySelector('.status-text')),
+    log:      /** @type {HTMLElement} */ (card.querySelector('.log')),
+    services: /** @type {HTMLElement} */ (card.querySelector('.service')),
+    ctx:      /** @type {HTMLCanvasElement}*/ (
+      card.querySelector('.chart')
+    ).getContext('2d'),
+    stopBt,
+    closeBt
+  };
+};
+
+/**
+ * Inject clickable service links into a card.
+ * @param {HTMLElement} root
+ * @param {Array<{hostPort:number,service:string}>} ports
+ */
+const renderServiceLinks = (root, ports) => {
+  if (!ports?.length) return;
+  root.textContent = '— services —';
+  ports.forEach(p => {
+    if (!p.hostPort) return;
+    root.insertAdjacentHTML(
+      'beforeend',
+      `<br/> → <small><a href="http://${location.hostname}:${p.hostPort}" target="_blank">http://${p.service.slice(0,5)}:${p.hostPort}</a></small><br/>`
+    );
+  });
+};
+
+/**
+ * Build an empty chart for live stats.
+ * @param {CanvasRenderingContext2D} ctx
+ */
+const buildChart = ctx =>
+  new Chart(ctx, {
+    type: 'line',
+    data: {
+      labels: [],
+      datasets: [
+        { label: 'CPU %', data: [], yAxisID: 'y1' },
+        { label: 'Mem MB', data: [], yAxisID: 'y2' }
+      ]
+    },
+    options: {
+      animation: false,
+      scales: {
+        y1: { type: 'linear', position: 'left', suggestedMax: 100 },
+        y2: {
+          type: 'linear',
+          position: 'right',
+          grid: { drawOnChartArea: false }
         }
       }
-      poll();
     }
+  });
 
-    const buildChart = ctx => new Chart(ctx, {
-        type: 'line',
-        data: {
-            labels: [],
-            datasets: [{
-                    label: 'CPU %',
-                    data: [],
-                    yAxisID: 'y1'
-                },
-                {
-                    label: 'Mem MB',
-                    data: [],
-                    yAxisID: 'y2'
-                }
-            ]
-        },
-        options: {
-            animation: false,
-            scales: {
-                y1: {
-                    type: 'linear',
-                    position: 'left',
-                    suggestedMax: 100
-                },
-                y2: {
-                    type: 'linear',
-                    position: 'right',
-                    grid: {
-                        drawOnChartArea: false
-                    }
-                }
-            }
-        }
+/**
+ * Begin log polling for a sandbox.
+ * @param {HTMLElement} logEl
+ * @param {string} sid
+ */
+const startLogPolling = (logEl, sid) => {
+  let pos = 0;
+  const go = async () => {
+    try {
+      const res = await tailLogs(sid, pos);
+      if (res) {
+        pos = res.pos;
+        res.lines.forEach(l => (logEl.textContent += `${l}\n`));
+        logEl.scrollTop = logEl.scrollHeight;
+      }
+    } catch (err) {
+      console.error('[log‑poll]', err);
+    } finally {
+      setTimeout(go, LOG_POLL);
+    }
+  };
+  go();
+};
+
+/**
+ * Schedule periodic stats fetch + chart update.
+ * @param {string} cid
+ * @returns {number} – interval id
+ */
+const pollStats = (cid, chart) =>
+  setInterval(async () => {
+    try {
+      const s = await fetchStats(cid);
+      const t = new Date().toLocaleTimeString();
+      chart.data.labels.push(t);
+      chart.data.datasets[0].data.push(+s.cpu);
+      chart.data.datasets[1].data.push((+s.mem / 1048576).toFixed(1));
+      if (chart.data.labels.length > 30) {
+        chart.data.labels.shift();
+        chart.data.datasets.forEach(d => d.data.shift());
+      }
+      chart.update();
+    } catch (error) { console.log(error); }
+  }, STAT_POLL);
+
+/** Handle a new build request. */
+const handleBuild = async () => {
+  setLoading(true);
+  const {
+    card, status, log, services, ctx, stopBt, closeBt
+  } = createCard();
+
+  try {
+    const fd  = new FormData(els.form);
+    const res = await requestBuild(fd);
+    if (!res.ok) throw new Error(res.error || 'Build failed');
+
+    startLogPolling(log, res.sandboxId);
+
+    const chart  = buildChart(ctx);
+    const intId  = pollStats(res.containerIds[0], chart);
+
+    saveBuild({
+      sid:          res.sandboxId,
+      ports:        res.ports,
+      containerIds: res.containerIds
     });
 
-    const pollStats = (cid, chart) => setInterval(async () => {
-        try {
-            const s = await fetch(`/stats.php?cid=${cid}`).then((r) => r.json());
-            // if (s.cpu === undefined) return; // container may be gone
-            const t = new Date().toLocaleTimeString();
-            chart.data.labels.push(t);
-            chart.data.datasets[0].data.push(+s.cpu);
-            chart.data.datasets[1].data.push((+s.mem / 1048576).toFixed(1)); // bytes → MB
-            if (chart.data.labels.length > 30) {
-                chart.data.labels.shift();
-                chart.data.datasets.forEach(d => d.data.shift());
-            }
-            chart.update();
-        } catch {}
-    }, 2000);
-
-    const build = async () => {
-        setLoading(true);
-        const {
-            card,
-            status,
-            logEl,
-            serviceEl,
-            ctx,
-            stopBt,
-            clsBt
-        } = createCard();
-
-        console.log({
-            card,
-            status,
-            logEl,
-            serviceEl,
-            ctx,
-            stopBt,
-            clsBt
-        });
-        const fd = new FormData(els.form);
-        console.log(fd);
-
-        try {
-            const res = await fetch('/build.php', {
-                    method: 'POST',
-                    body: fd
-                })
-                .then((r) => r.json());
-            console.log("response: ", res);
-            if (!res.ok) throw new Error(res.error || 'Build failed');
-
-            startLogPolling(logEl, res.sandboxId);
-
-            const chart = buildChart(ctx);
-            const pollId = pollStats(res.containerIds[0], chart);
-
-            stopBt.onclick = async () => {
-                stopBt.disabled = true;
-                await fetch(`/stop.php?sid=${res.sandboxId}`);
-            };
-            clsBt.onclick = () => {
-                //es.close();
-                clearInterval(pollId);
-                card.remove();
-            };
-
-            status.textContent = '✔ Done';
-            if (res.ports?.length) {
-                serviceEl.textContent += '— services —\n';
-                res.ports.forEach((p) =>
-                    // we post the service only if the port is available
-                    p.hostPort && (serviceEl.innerHTML += `<br/> → <small><a href="http://${location.hostname}:${p.hostPort}" target="_blank">${p.service.substring(0,5)}:${p.hostPort}</a></small>\n`)
-                );
-            }
-        } catch (e) {
-            serviceEl.textContent += `❌ ${e.message}`;
-            console.log(`Error: ${e.message}`, true);
-        } finally {
-            setLoading(false);
-        }
+    stopBt.onclick = async () => {
+      stopBt.disabled = true;
+      await stopSandbox(res.sandboxId);
+    };
+    closeBt.onclick = () => {
+      clearInterval(intId);
+      card.remove();
     };
 
-    els.form.onsubmit = (e) => {
-        e.preventDefault();
-        if (!els.repoInput.value.trim()) {
-            alert('Repository URL required !!!');
-        }
-        build();
+    status.textContent = '✔ Done (click to close/expand)';
+    renderServiceLinks(services, res.ports);
+  } catch (e) {
+    status.textContent = `❌ ${e.message}`;
+  } finally {
+    setLoading(false);
+  }
+};
+
+// Restore previously running builds from localStorage.
+const bootstrap = () => {
+  loadStored().forEach(b => {
+    const {
+      card, log, services, ctx, closeBt
+    } = createCard();
+    closeBt.disabled = false; // it's always stoppable
+
+    startLogPolling(log, b.sid);
+    const chart  = buildChart(ctx);
+    const intId  = pollStats(b.containerIds[0], chart);
+
+    closeBt.onclick = () => {
+      clearInterval(intId);
+      dropBuild(b.sid);
+      card.remove();
     };
 
-    // For cards enhances
-    const box   = document.getElementById('sandboxes');
-    let dragged = null;
+    renderServiceLinks(services, b.ports);
+    card.querySelector('.status-text').textContent = '✔ Running';
+  });
+};
 
-    /* Make every card draggable (in case the attribute is missing) */
-    box.querySelectorAll('.card').forEach(c => c.setAttribute('draggable', true));
-    box.addEventListener('dragstart', e=>{
-      if (e.target.classList.contains('card')){
-        dragged = e.target;
-        e.target.classList.add('dragging');
-        e.dataTransfer.effectAllowed='move';
-      }
-    });
-    box.addEventListener('dragend', e=>{
-      if (e.target.classList.contains('card')){
-        e.target.classList.remove('dragging');
-        dragged = null;
-      }
-    });
-    /* reorder while hovering other cards */
-    box.addEventListener('dragover', e=>{
-      e.preventDefault();                                         // allow drop
-      const cards = [...box.querySelectorAll('.card:not(.dragging)')];
-      const next  = cards.find(card=>{
-        const r = card.getBoundingClientRect();
-        return e.clientY < r.top + r.height/2;                    // above centre?
-      });
-      box.insertBefore(dragged, next || null);                    // null → append
-    });
+document.addEventListener('DOMContentLoaded', () => {
+  bootstrap();
+  els.form.onsubmit = e => {
+    e.preventDefault();
+    if (!els.repo.value.trim()) return alert('Repository URL required!');
+    handleBuild();
+  };
 });

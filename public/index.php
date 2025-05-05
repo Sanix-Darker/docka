@@ -60,6 +60,9 @@ $config = require __DIR__ . '/../config/config.php';
       </div>
     </div>
 -->
+    <hr/>
+    Made by <a style="color: white" href="https://github.com/sanix-darker" target="_blank">sanixdk</a>
+    <br/><br/>
   </div>
 
   <script src="assets/js/app.js"></script>

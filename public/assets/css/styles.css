@@ -296,11 +296,15 @@ input[type="url"]:focus {
   display: none;
 }
 
+small a {
+    color: white;
+    text-decoration: dashed;
+}
 #sandboxes{
   display:flex;
   flex-wrap:wrap;
   gap:1rem;
-  align-items:flex-start;                 /* cards keep independent heights  */
+  align-items:flex-start;                 /* (this does not work well lmao, cards should keep independent heights  */
 }
 #sandboxes .card{
   padding:1rem;
@@ -324,7 +328,7 @@ input[type="url"]:focus {
 }
 /* Hover zoom + drop‑shadow */
 #sandboxes .card:hover{
-  transform:scale(1.003);
+  transform:scale(1.0005);
   box-shadow:0 10px 24px rgba(0,0,0,.5);
   z-index:10;
 }
