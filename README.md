@@ -39,3 +39,8 @@ php -S 0.0.0.0:7711 -t public
    * captures logs and published ports (so that it can be access by anyone...)
 
 4. The JSON response is rendered back into the `<pre>` block with live links.
+
+## FULL DEMO EXAMPLE
+
+
+https://github.com/user-attachments/assets/652fecc4-3047-4f7b-95aa-6319321d5d38
