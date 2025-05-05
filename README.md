@@ -42,5 +42,4 @@ php -S 0.0.0.0:7711 -t public
 
 ## FULL DEMO EXAMPLE
 
-
 https://github.com/user-attachments/assets/652fecc4-3047-4f7b-95aa-6319321d5d38

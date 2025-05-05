@@ -1,0 +1,2 @@
+- running the same service twice is not that well working (trying to fix that
+- better handling of docker-compose services
