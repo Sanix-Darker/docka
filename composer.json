@@ -21,6 +21,6 @@
     ],
     "require": {
         "illuminate/collections": "^12.12",
-        "symfony/yaml": "^7.2"
+        "symfony/yaml": "^8.0"
     }
 }
