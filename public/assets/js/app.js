@@ -1,323 +1,712 @@
 /**
- * Return the current PHP session id (or "anon" if none found).
+ * Docka - Docker Sandbox Runner
+ * Frontend application
+ */
+
+'use strict';
+
+// ─────────────────────────────────────────────────────────────────────────────
+// CONFIGURATION
+// ─────────────────────────────────────────────────────────────────────────────
+
+const CONFIG = Object.freeze({
+    LOG_POLL_MS: 1500,
+    STATS_POLL_MS: 3000,
+    MAX_LOG_LINES: 500,
+    MAX_CHART_POINTS: 30,
+    STORAGE_KEY_PREFIX: 'docka_',
+    ENDPOINTS: {
+        build: '/build.php',
+        stop: '/stop.php',
+        stats: '/stats.php',
+        tail: '/tail.php',
+    },
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// UTILITIES
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Get the current PHP session ID from cookies
  * @returns {string}
  */
 const getSessionId = () => {
-  const match = document.cookie.match(/PHPSESSID=([^;]+)/);
-  return match ? decodeURIComponent(match[1]) : 'anon';
+    const match = document.cookie.match(/PHPSESSID=([^;]+)/);
+    return match ? decodeURIComponent(match[1]) : 'anon';
 };
 
-// common const
-const LS_KEY = `docka_${getSessionId()}`;
-const LOG_POLL   = 2000;
-const STAT_POLL  = 3500;
-
+/**
+ * Generate storage key for current session
+ * @returns {string}
+ */
+const getStorageKey = () => `${CONFIG.STORAGE_KEY_PREFIX}${getSessionId()}`;
 
 /**
- * @typedef {Object} BuildInfo
- * @property {string} sid      – sandbox id
- * @property {Array<{hostPort:number,service:string}>} [ports]
+ * Format bytes to human readable string
+ * @param {number} bytes
+ * @returns {string}
+ */
+const formatBytes = (bytes) => {
+    if (bytes === null || bytes === undefined) return 'N/A';
+    const units = ['B', 'KB', 'MB', 'GB'];
+    let i = 0;
+    while (bytes >= 1024 && i < units.length - 1) {
+        bytes /= 1024;
+        i++;
+    }
+    return `${bytes.toFixed(1)} ${units[i]}`;
+};
+
+/**
+ * Escape HTML to prevent XSS
+ * @param {string} str
+ * @returns {string}
+ */
+const escapeHtml = (str) => {
+    const div = document.createElement('div');
+    div.textContent = str;
+    return div.innerHTML;
+};
+
+/**
+ * Debounce function calls
+ * @param {Function} fn
+ * @param {number} delay
+ * @returns {Function}
+ */
+const debounce = (fn, delay) => {
+    let timer;
+    return (...args) => {
+        clearTimeout(timer);
+        timer = setTimeout(() => fn(...args), delay);
+    };
+};
+
+// ─────────────────────────────────────────────────────────────────────────────
+// STORAGE
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * @typedef {Object} StoredBuild
+ * @property {string} sid - Sandbox ID
+ * @property {string} repo - Repository URL
+ * @property {Array<{hostPort: number, service: string, containerPort: number}>} ports
  * @property {string[]} containerIds
+ * @property {number} created - Timestamp
  */
 
-/**
- * Load every stored build for the current session.
- * @returns {BuildInfo[]}
- */
-const loadStored = () =>
-  JSON.parse(localStorage.getItem(LS_KEY) || '[]');
-
-/**
- * Persist (or replace) a build.
- * @param {BuildInfo} build
- */
-const saveBuild = build => {
-  const items = loadStored().filter(b => b.sid !== build.sid);
-  items.push(build);
-  localStorage.setItem(LS_KEY, JSON.stringify(items));
-};
-
-/**
- * Drop a build from storage.
- * @param {string} sid
- */
-const dropBuild = sid => {
-  const items = loadStored().filter(b => b.sid !== sid);
-  localStorage.setItem(LS_KEY, JSON.stringify(items));
-};
-
-/**
- * POST /build.php
- * @param {FormData} fd
- * @returns {Promise<{
- *   ok:boolean,
- *   error?:string,
- *   sandboxId:string,
- *   ports:Array<{hostPort:number,service:string}>,
- *   containerIds:string[]
- * }>}
- */
-const requestBuild = fd =>
-  fetch('/build.php', { method: 'POST', body: fd }).then(r => r.json());
-
-/**
- * GET /stop.php
- * @param {string} sid
- * @returns {Promise<void>}
- */
-const stopSandbox = sid => fetch(`/stop.php?sid=${sid}`);
-
-/**
- * GET /stats.php
- * @param {string} cid
- * @returns {Promise<{cpu:number,mem:number}>}
- */
-const fetchStats = cid =>
-  fetch(`/stats.php?cid=${cid}`, { cache: 'no-store' }).then(r => r.json());
-
-/**
- * GET /tail.php
- * @param {string} sid
- * @param {number} pos
- * @returns {Promise<{pos:number,lines:string[]} | null>} – null when 204
- */
-const tailLogs = async (sid, pos) => {
-  const r = await fetch(
-    `/tail.php?sid=${encodeURIComponent(sid)}&pos=${pos}`,
-    { cache: 'no-store' }
-  );
-  return r.status === 204 ? null : r.json();
-};
-
-/**
- * DOM handles used everywhere.
- * @type {{form:HTMLFormElement,repo:HTMLInputElement,submit:HTMLButtonElement,cards:HTMLElement}}
- */
-const els = {
-  form:   /** @type {HTMLFormElement}   */ (document.getElementById('build-form')),
-  repo:   /** @type {HTMLInputElement}  */ (document.getElementById('repo-url')),
-  submit: /** @type {HTMLButtonElement} */ (document.getElementById('submit-btn')),
-  cards:  /** @type {HTMLElement}       */ (document.getElementById('sandboxes'))
-};
-
-/**
- * Toggle submit‑button loading state.
- * @param {boolean} busy
- */
-const setLoading = busy => {
-  els.submit.disabled = busy;
-  els.submit.innerHTML = busy
-    ? '<span class="spinner"></span>&nbsp;Building…'
-    : 'Build and Run';
-};
-
-let seq = 0;
-
-/**
- * Create and insert a fresh card into the DOM.
- * @returns {{
- *   card:HTMLElement, status:HTMLElement, log:HTMLElement,
- *   services:HTMLElement, ctx:CanvasRenderingContext2D,
- *   stopBt:HTMLButtonElement, closeBt:HTMLButtonElement
- * }}
- */
-const createCard = () => {
-  const id = ++seq;
-  els.cards.insertAdjacentHTML(
-    'afterbegin',
-    `<div class="card">
-      <h2>Build #${id}</h2>
-      <nav class="service"></nav>
-      <hr/>
-      <details class="log-box" open>
-        <summary>Logs <span class="status-text">⏳ Building… click to expand/close…</span></summary>
-        <pre class="log"></pre>
-      </details>
-      <canvas class="chart" width="400" height="150"></canvas>
-      <div class="actions">
-        <button class="stop">-Stop</button>
-        <button class="close">✖Close</button>
-      </div>
-    </div>`
-  );
-
-  const card     = /** @type {HTMLElement} */ (els.cards.firstElementChild);
-  const stopBt   = /** @type {HTMLButtonElement} */ (card.querySelector('.stop'));
-  const closeBt  = /** @type {HTMLButtonElement} */ (card.querySelector('.close'));
-
-  closeBt.onclick = () => card.remove();
-
-  return {
-    card,
-    status:   /** @type {HTMLElement} */ (card.querySelector('.status-text')),
-    log:      /** @type {HTMLElement} */ (card.querySelector('.log')),
-    services: /** @type {HTMLElement} */ (card.querySelector('.service')),
-    ctx:      /** @type {HTMLCanvasElement}*/ (
-      card.querySelector('.chart')
-    ).getContext('2d'),
-    stopBt,
-    closeBt
-  };
-};
-
-/**
- * Inject clickable service links into a card.
- * @param {HTMLElement} root
- * @param {Array<{hostPort:number,service:string}>} ports
- */
-const renderServiceLinks = (root, ports) => {
-  if (!ports?.length) return;
-  root.textContent = '— services —';
-  ports.forEach(p => {
-    if (!p.hostPort) return;
-    root.insertAdjacentHTML(
-      'beforeend',
-      `<br/> → <small><a href="http://${location.hostname}:${p.hostPort}" target="_blank">http://${p.service.slice(0,5)}:${p.hostPort}</a></small><br/>`
-    );
-  });
-};
-
-/**
- * Build an empty chart for live stats.
- * @param {CanvasRenderingContext2D} ctx
- */
-const buildChart = ctx =>
-  new Chart(ctx, {
-    type: 'line',
-    data: {
-      labels: [],
-      datasets: [
-        { label: 'CPU %', data: [], yAxisID: 'y1' },
-        { label: 'Mem MB', data: [], yAxisID: 'y2' }
-      ]
-    },
-    options: {
-      animation: false,
-      scales: {
-        y1: { type: 'linear', position: 'left', suggestedMax: 100 },
-        y2: {
-          type: 'linear',
-          position: 'right',
-          grid: { drawOnChartArea: false }
+const Storage = {
+    /**
+     * Load all stored builds for current session
+     * @returns {StoredBuild[]}
+     */
+    load() {
+        try {
+            const data = localStorage.getItem(getStorageKey());
+            return data ? JSON.parse(data) : [];
+        } catch (e) {
+            console.error('[Storage] Load failed:', e);
+            return [];
         }
-      }
-    }
-  });
+    },
+
+    /**
+     * Save a build to storage
+     * @param {StoredBuild} build
+     */
+    save(build) {
+        try {
+            const items = this.load().filter(b => b.sid !== build.sid);
+            items.push(build);
+            localStorage.setItem(getStorageKey(), JSON.stringify(items));
+        } catch (e) {
+            console.error('[Storage] Save failed:', e);
+        }
+    },
+
+    /**
+     * Remove a build from storage
+     * @param {string} sid
+     */
+    remove(sid) {
+        try {
+            const items = this.load().filter(b => b.sid !== sid);
+            localStorage.setItem(getStorageKey(), JSON.stringify(items));
+        } catch (e) {
+            console.error('[Storage] Remove failed:', e);
+        }
+    },
+
+    /**
+     * Check if a sandbox is already stored
+     * @param {string} sid
+     * @returns {boolean}
+     */
+    has(sid) {
+        return this.load().some(b => b.sid === sid);
+    },
+
+    /**
+     * Clean up old entries (older than 2 hours)
+     */
+    cleanup() {
+        try {
+            const maxAge = 2 * 60 * 60 * 1000; // 2 hours
+            const now = Date.now();
+            const items = this.load().filter(b => {
+                return b.created && (now - b.created) < maxAge;
+            });
+            localStorage.setItem(getStorageKey(), JSON.stringify(items));
+        } catch (e) {
+            console.error('[Storage] Cleanup failed:', e);
+        }
+    },
+};
+
+// ─────────────────────────────────────────────────────────────────────────────
+// API
+// ─────────────────────────────────────────────────────────────────────────────
+
+const API = {
+    /**
+     * Submit a build request
+     * @param {FormData} formData
+     * @returns {Promise<{ok: boolean, error?: string, sandboxId?: string, ports?: Array, containerIds?: string[]}>}
+     */
+    async build(formData) {
+        const response = await fetch(CONFIG.ENDPOINTS.build, {
+            method: 'POST',
+            body: formData,
+            credentials: 'same-origin',
+        });
+        return response.json();
+    },
+
+    /**
+     * Stop a sandbox
+     * @param {string} sid
+     * @returns {Promise<{ok: boolean}>}
+     */
+    async stop(sid) {
+        const response = await fetch(`${CONFIG.ENDPOINTS.stop}?sid=${encodeURIComponent(sid)}`, {
+            credentials: 'same-origin',
+        });
+        return response.json();
+    },
+
+    /**
+     * Get container stats
+     * @param {string} cid
+     * @returns {Promise<{cpu?: number, mem?: number, running?: boolean}>}
+     */
+    async stats(cid) {
+        const response = await fetch(`${CONFIG.ENDPOINTS.stats}?cid=${encodeURIComponent(cid)}`, {
+            cache: 'no-store',
+            credentials: 'same-origin',
+        });
+        return response.json();
+    },
+
+    /**
+     * Tail log file
+     * @param {string} sid
+     * @param {number} pos
+     * @returns {Promise<{pos: number, lines: string[]} | null>}
+     */
+    async tail(sid, pos) {
+        const response = await fetch(
+            `${CONFIG.ENDPOINTS.tail}?sid=${encodeURIComponent(sid)}&pos=${pos}`,
+            { cache: 'no-store', credentials: 'same-origin' }
+        );
+        if (response.status === 204) return null;
+        if (!response.ok) return null;
+        return response.json();
+    },
+};
+
+// ─────────────────────────────────────────────────────────────────────────────
+// SANDBOX CARD
+// ─────────────────────────────────────────────────────────────────────────────
 
 /**
- * Begin log polling for a sandbox.
- * @param {HTMLElement} logEl
- * @param {string} sid
+ * Manages a single sandbox card
  */
-const startLogPolling = (logEl, sid) => {
-  let pos = 0;
-  const go = async () => {
-    try {
-      const res = await tailLogs(sid, pos);
-      if (res) {
-        pos = res.pos;
-        res.lines.forEach(l => (logEl.textContent += `${l}\n`));
-        logEl.scrollTop = logEl.scrollHeight;
-      }
-    } catch (err) {
-      console.error('[log‑poll]', err);
-    } finally {
-      setTimeout(go, LOG_POLL);
+class SandboxCard {
+    static counter = 0;
+
+    /**
+     * @param {string} sid - Sandbox ID
+     * @param {HTMLElement} container - Container element
+     */
+    constructor(sid, container) {
+        this.sid = sid;
+        this.buildNum = ++SandboxCard.counter;
+        this.logPos = 0;
+        this.logLines = 0;
+        this.chart = null;
+        this.logTimer = null;
+        this.statsTimer = null;
+        this.destroyed = false;
+        this.containerIds = [];
+
+        this.createElement(container);
+        this.setupChart();
     }
-  };
-  go();
-};
 
-/**
- * Schedule periodic stats fetch + chart update.
- * @param {string} cid
- * @returns {number} – interval id
- */
-const pollStats = (cid, chart) =>
-  setInterval(async () => {
-    try {
-      const s = await fetchStats(cid);
-      const t = new Date().toLocaleTimeString();
-      chart.data.labels.push(t);
-      chart.data.datasets[0].data.push(+s.cpu);
-      chart.data.datasets[1].data.push((+s.mem / 1048576).toFixed(1));
-      if (chart.data.labels.length > 30) {
-        chart.data.labels.shift();
-        chart.data.datasets.forEach(d => d.data.shift());
-      }
-      chart.update();
-    } catch (error) { console.log(error); }
-  }, STAT_POLL);
+    /**
+     * Create DOM elements from template
+     * @param {HTMLElement} container
+     */
+    createElement(container) {
+        const template = document.getElementById('sandbox-card-template');
+        const clone = template.content.cloneNode(true);
 
-/** Handle a new build request. */
-const handleBuild = async () => {
-  setLoading(true);
-  const {
-    card, status, log, services, ctx, stopBt, closeBt
-  } = createCard();
+        this.element = clone.querySelector('.card');
+        this.element.dataset.sid = this.sid;
+        this.element.querySelector('.build-num').textContent = this.buildNum;
 
-  try {
-    const fd  = new FormData(els.form);
-    const res = await requestBuild(fd);
-    if (!res.ok) throw new Error(res.error || 'Build failed');
+        this.statusEl = this.element.querySelector('.card-status');
+        this.servicesEl = this.element.querySelector('.card-services');
+        this.logEl = this.element.querySelector('.log-output');
+        this.chartCanvas = this.element.querySelector('.chart');
+        this.stopBtn = this.element.querySelector('.btn--stop');
+        this.closeBtn = this.element.querySelector('.btn--close');
 
-    startLogPolling(log, res.sandboxId);
+        // Event listeners
+        this.stopBtn.addEventListener('click', () => this.stop());
+        this.closeBtn.addEventListener('click', () => this.close());
 
-    const chart  = buildChart(ctx);
-    const intId  = pollStats(res.containerIds[0], chart);
+        container.prepend(this.element);
+    }
 
-    saveBuild({
-      sid:          res.sandboxId,
-      ports:        res.ports,
-      containerIds: res.containerIds
-    });
+    /**
+     * Set up Chart.js instance
+     */
+    setupChart() {
+        const ctx = this.chartCanvas.getContext('2d');
+        this.chart = new Chart(ctx, {
+            type: 'line',
+            data: {
+                labels: [],
+                datasets: [
+                    {
+                        label: 'CPU %',
+                        data: [],
+                        borderColor: '#4d8edb',
+                        backgroundColor: 'rgba(77, 142, 219, 0.1)',
+                        yAxisID: 'y1',
+                        tension: 0.3,
+                        fill: true,
+                    },
+                    {
+                        label: 'Memory MB',
+                        data: [],
+                        borderColor: '#5cff5c',
+                        backgroundColor: 'rgba(92, 255, 92, 0.1)',
+                        yAxisID: 'y2',
+                        tension: 0.3,
+                        fill: true,
+                    },
+                ],
+            },
+            options: {
+                animation: false,
+                responsive: true,
+                maintainAspectRatio: false,
+                interaction: {
+                    intersect: false,
+                    mode: 'index',
+                },
+                plugins: {
+                    legend: {
+                        labels: { color: '#9da5b4', font: { size: 10 } },
+                    },
+                },
+                scales: {
+                    x: {
+                        display: false,
+                    },
+                    y1: {
+                        type: 'linear',
+                        position: 'left',
+                        suggestedMax: 100,
+                        ticks: { color: '#4d8edb', font: { size: 10 } },
+                        grid: { color: 'rgba(255,255,255,0.05)' },
+                    },
+                    y2: {
+                        type: 'linear',
+                        position: 'right',
+                        ticks: { color: '#5cff5c', font: { size: 10 } },
+                        grid: { drawOnChartArea: false },
+                    },
+                },
+            },
+        });
+    }
 
-    stopBt.onclick = async () => {
-      stopBt.disabled = true;
-      await stopSandbox(res.sandboxId);
-    };
-    closeBt.onclick = () => {
-      clearInterval(intId);
-      card.remove();
-    };
+    /**
+     * Set status text and class
+     * @param {string} text
+     * @param {'building' | 'running' | 'stopped' | 'error'} state
+     */
+    setStatus(text, state) {
+        this.statusEl.textContent = text;
+        this.statusEl.className = `card-status status--${state}`;
+    }
 
-    status.textContent = '✔ Done (click to close/expand)';
-    renderServiceLinks(services, res.ports);
-  } catch (e) {
-    status.textContent = `❌ ${e.message}`;
-  } finally {
-    setLoading(false);
-  }
-};
+    /**
+     * Render service links
+     * @param {Array<{hostPort: number, service: string, containerPort: number}>} ports
+     */
+    renderServices(ports) {
+        if (!ports || ports.length === 0) {
+            this.servicesEl.innerHTML = '<span class="no-services">No exposed ports</span>';
+            return;
+        }
 
-// Restore previously running builds from localStorage.
-const bootstrap = () => {
-  loadStored().forEach(b => {
-    const {
-      card, log, services, ctx, closeBt
-    } = createCard();
-    closeBt.disabled = false; // it's always stoppable
+        const links = ports.map(p => {
+            if (!p.hostPort) return '';
+            const url = `http://${location.hostname}:${p.hostPort}`;
+            const label = p.service ? p.service.substring(0, 15) : `Port ${p.containerPort}`;
+            return `<a href="${escapeHtml(url)}" target="_blank" rel="noopener" class="service-link">
+                ${escapeHtml(label)} → :${p.hostPort}
+            </a>`;
+        }).filter(Boolean);
 
-    startLogPolling(log, b.sid);
-    const chart  = buildChart(ctx);
-    const intId  = pollStats(b.containerIds[0], chart);
+        this.servicesEl.innerHTML = links.join('');
+    }
 
-    closeBt.onclick = () => {
-      clearInterval(intId);
-      dropBuild(b.sid);
-      card.remove();
-    };
+    /**
+     * Append log lines
+     * @param {string[]} lines
+     */
+    appendLog(lines) {
+        if (!lines.length) return;
 
-    renderServiceLinks(services, b.ports);
-    card.querySelector('.status-text').textContent = '✔ Running';
-  });
-};
+        for (const line of lines) {
+            this.logLines++;
+            // Trim old lines if too many
+            if (this.logLines > CONFIG.MAX_LOG_LINES) {
+                const firstNewline = this.logEl.textContent.indexOf('\n');
+                if (firstNewline > 0) {
+                    this.logEl.textContent = this.logEl.textContent.substring(firstNewline + 1);
+                }
+            }
+            this.logEl.textContent += line + '\n';
+        }
+
+        // Auto-scroll to bottom
+        this.logEl.scrollTop = this.logEl.scrollHeight;
+    }
+
+    /**
+     * Update stats chart
+     * @param {{cpu?: number, mem?: number}} stats
+     */
+    updateChart(stats) {
+        if (!this.chart || this.destroyed) return;
+
+        const time = new Date().toLocaleTimeString();
+        const { labels, datasets } = this.chart.data;
+
+        labels.push(time);
+        datasets[0].data.push(stats.cpu ?? 0);
+        datasets[1].data.push(stats.mem ? (stats.mem / (1024 * 1024)).toFixed(1) : 0);
+
+        // Keep chart data bounded
+        if (labels.length > CONFIG.MAX_CHART_POINTS) {
+            labels.shift();
+            datasets.forEach(d => d.data.shift());
+        }
+
+        this.chart.update('none'); // No animation for performance
+    }
+
+    /**
+     * Start log polling
+     */
+    startLogPolling() {
+        if (this.destroyed) return;
+
+        const poll = async () => {
+            if (this.destroyed) return;
+
+            try {
+                const result = await API.tail(this.sid, this.logPos);
+                if (result && result.lines) {
+                    this.logPos = result.pos;
+                    this.appendLog(result.lines);
+                }
+            } catch (e) {
+                console.error('[Log Poll]', e);
+            }
+
+            if (!this.destroyed) {
+                this.logTimer = setTimeout(poll, CONFIG.LOG_POLL_MS);
+            }
+        };
+
+        poll();
+    }
+
+    /**
+     * Start stats polling
+     * @param {string} containerId
+     */
+    startStatsPolling(containerId) {
+        if (this.destroyed || !containerId) return;
+
+        const poll = async () => {
+            if (this.destroyed) return;
+
+            try {
+                const stats = await API.stats(containerId);
+                if (stats.running !== false) {
+                    this.updateChart(stats);
+                } else {
+                    // Container stopped
+                    this.setStatus('Stopped', 'stopped');
+                    this.stopPolling();
+                }
+            } catch (e) {
+                console.error('[Stats Poll]', e);
+            }
+
+            if (!this.destroyed) {
+                this.statsTimer = setTimeout(poll, CONFIG.STATS_POLL_MS);
+            }
+        };
+
+        poll();
+    }
+
+    /**
+     * Stop all polling
+     */
+    stopPolling() {
+        if (this.logTimer) {
+            clearTimeout(this.logTimer);
+            this.logTimer = null;
+        }
+        if (this.statsTimer) {
+            clearTimeout(this.statsTimer);
+            this.statsTimer = null;
+        }
+    }
+
+    /**
+     * Stop the sandbox
+     */
+    async stop() {
+        this.stopBtn.disabled = true;
+        this.stopBtn.textContent = 'Stopping...';
+
+        try {
+            await API.stop(this.sid);
+            this.setStatus('Stopped', 'stopped');
+            this.stopPolling();
+            Storage.remove(this.sid);
+        } catch (e) {
+            console.error('[Stop]', e);
+            this.stopBtn.disabled = false;
+            this.stopBtn.textContent = 'Stop';
+        }
+    }
+
+    /**
+     * Close and cleanup the card
+     */
+    close() {
+        this.destroy();
+        this.element.remove();
+        Storage.remove(this.sid);
+    }
+
+    /**
+     * Cleanup resources
+     */
+    destroy() {
+        this.destroyed = true;
+        this.stopPolling();
+
+        if (this.chart) {
+            this.chart.destroy();
+            this.chart = null;
+        }
+    }
+
+    /**
+     * Start monitoring an active build
+     * @param {Array} ports
+     * @param {string[]} containerIds
+     */
+    startMonitoring(ports, containerIds) {
+        this.containerIds = containerIds || [];
+        this.setStatus('Running', 'running');
+        this.renderServices(ports);
+        this.startLogPolling();
+
+        if (this.containerIds.length > 0) {
+            this.startStatsPolling(this.containerIds[0]);
+        }
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// APPLICATION
+// ─────────────────────────────────────────────────────────────────────────────
+
+class App {
+    constructor() {
+        this.form = document.getElementById('build-form');
+        this.repoInput = document.getElementById('repo-url');
+        this.submitBtn = document.getElementById('submit-btn');
+        this.sandboxesContainer = document.getElementById('sandboxes');
+
+        this.activeCards = new Map(); // sid -> SandboxCard
+        this.isBuilding = false;
+
+        this.init();
+    }
+
+    /**
+     * Initialize the application
+     */
+    init() {
+        // Clean up old storage entries
+        Storage.cleanup();
+
+        // Restore previous builds
+        this.restoreBuilds();
+
+        // Form submission
+        this.form.addEventListener('submit', (e) => {
+            e.preventDefault();
+            this.handleBuild();
+        });
+
+        // Cleanup on page unload
+        window.addEventListener('beforeunload', () => {
+            this.activeCards.forEach(card => card.destroy());
+        });
+    }
+
+    /**
+     * Set loading state
+     * @param {boolean} loading
+     */
+    setLoading(loading) {
+        this.isBuilding = loading;
+        this.submitBtn.disabled = loading;
+
+        const textEl = this.submitBtn.querySelector('.btn-text');
+        const loadingEl = this.submitBtn.querySelector('.btn-loading');
+
+        textEl.classList.toggle('hidden', loading);
+        loadingEl.classList.toggle('hidden', !loading);
+    }
+
+    /**
+     * Handle build form submission
+     */
+    async handleBuild() {
+        if (this.isBuilding) return;
+
+        const repo = this.repoInput.value.trim();
+        if (!repo) {
+            alert('Please enter a repository URL');
+            this.repoInput.focus();
+            return;
+        }
+
+        // Validate URL format
+        try {
+            const url = new URL(repo);
+            if (url.protocol !== 'https:') {
+                alert('Only HTTPS URLs are allowed');
+                return;
+            }
+        } catch {
+            alert('Invalid URL format');
+            return;
+        }
+
+        this.setLoading(true);
+
+        // Create card immediately for visual feedback
+        const tempId = `temp_${Date.now()}`;
+        const card = new SandboxCard(tempId, this.sandboxesContainer);
+        card.setStatus('Building...', 'building');
+        card.appendLog(['Starting build...']);
+
+        try {
+            const formData = new FormData(this.form);
+            const result = await API.build(formData);
+
+            if (!result.ok) {
+                throw new Error(result.error || 'Build failed');
+            }
+
+            // Update card with real sandbox ID
+            card.sid = result.sandboxId;
+            card.element.dataset.sid = result.sandboxId;
+
+            // Save to storage
+            Storage.save({
+                sid: result.sandboxId,
+                repo: repo,
+                ports: result.ports,
+                containerIds: result.containerIds,
+                created: Date.now(),
+            });
+
+            // Track active card
+            this.activeCards.set(result.sandboxId, card);
+
+            // Start monitoring
+            card.startMonitoring(result.ports, result.containerIds);
+            card.appendLog(['Build completed successfully']);
+
+        } catch (e) {
+            console.error('[Build]', e);
+            card.setStatus(`Error: ${e.message}`, 'error');
+            card.appendLog([`ERROR: ${e.message}`]);
+            card.stopBtn.disabled = true;
+        } finally {
+            this.setLoading(false);
+        }
+    }
+
+    /**
+     * Restore builds from storage
+     */
+    restoreBuilds() {
+        const builds = Storage.load();
+
+        for (const build of builds) {
+            // Skip if already showing
+            if (this.activeCards.has(build.sid)) continue;
+
+            const card = new SandboxCard(build.sid, this.sandboxesContainer);
+            card.setStatus('Running', 'running');
+            card.renderServices(build.ports);
+
+            this.activeCards.set(build.sid, card);
+
+            // Start monitoring
+            card.startLogPolling();
+            if (build.containerIds && build.containerIds.length > 0) {
+                card.startStatsPolling(build.containerIds[0]);
+            }
+        }
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// INITIALIZATION
+// ─────────────────────────────────────────────────────────────────────────────
 
 document.addEventListener('DOMContentLoaded', () => {
-  bootstrap();
-  els.form.onsubmit = e => {
-    e.preventDefault();
-    if (!els.repo.value.trim()) return alert('Repository URL required!');
-    handleBuild();
-  };
+    window.dockaApp = new App();
 });
