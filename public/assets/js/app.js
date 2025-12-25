@@ -180,7 +180,14 @@ const API = {
             body: formData,
             credentials: 'same-origin',
         });
-        return response.json();
+
+        const text = await response.text();
+        try {
+            return JSON.parse(text);
+        } catch (e) {
+            console.error('[API] Invalid JSON response:', text);
+            return { ok: false, error: 'Server error: ' + (text.substring(0, 100) || 'Empty response') };
+        }
     },
 
     /**

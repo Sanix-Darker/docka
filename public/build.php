@@ -2,16 +2,28 @@
 
 declare(strict_types=1);
 
-header('Content-Type: application/json');
+// Catch any PHP errors/warnings and convert to JSON
+ob_start();
 
-// Prevent caching
-header('Cache-Control: no-store, no-cache, must-revalidate');
-header('Pragma: no-cache');
+// Disable error display (we'll handle it ourselves)
+ini_set('display_errors', '0');
+error_reporting(E_ALL);
+
+header('Content-Type: application/json');
+// ... rest of headers ...
 
 session_start();
 $sessionId = session_id();
 
-require __DIR__ . '/../vendor/autoload.php';
+// Check if vendor autoload exists
+$autoloadPath = __DIR__ . '/../vendor/autoload.php';
+if (!file_exists($autoloadPath)) {
+    ob_end_clean();
+    echo json_encode(['ok' => false, 'error' => 'Dependencies not installed. Run: composer install']);
+    exit;
+}
+
+require $autoloadPath;
 
 use App\Sandbox;
 use App\RateLimiter;
@@ -30,6 +42,9 @@ Utils::initLogging(
  */
 function respond(bool $ok, array $data = []): never
 {
+    // Clear any buffered output (PHP warnings, etc.)
+    ob_end_clean();
+
     echo json_encode(['ok' => $ok] + $data, JSON_UNESCAPED_SLASHES);
     exit;
 }

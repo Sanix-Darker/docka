@@ -63,9 +63,10 @@ class RepositoryManager
             'workDir' => $this->workDir,
         ]);
 
-        // Ensure work directory doesn't exist yet
+        // If work directory exists, clean it up and re-clone
         if (is_dir($this->workDir)) {
-            throw new \RuntimeException('Work directory already exists');
+            Utils::log('INFO', 'Cleaning up existing work directory', ['workDir' => $this->workDir]);
+            Utils::rmrf($this->workDir);
         }
 
         // Create parent directory
