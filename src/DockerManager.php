@@ -1,381 +1,635 @@
 <?php
+
+declare(strict_types=1);
+
 namespace App;
 
 use Symfony\Component\Yaml\Yaml;
-use FilesystemIterator as FI;
 
 /**
- * Handle building / running Docker or Docker‑Compose projects
- * with optional resource limits & firewall hole‑punching.
+ * Manages Docker build and run operations with security controls
  */
 class DockerManager
 {
-    private string  $id;
-    private string  $workDir;
-    private int     $ttl;
-    private array   $limits;
-    private string  $fwChain;
+    private string $id;
+    private string $workDir;
+    private int $ttl;
+    private array $limits;
+    private array $securityOpts;
+    private string $fwChain;
     private ?string $sessionFlag;
     private ?string $envFile;
+    private ?string $logFile;
+    private array $portRange;
 
-    /* cache for storage‑driver detection */
     private static ?bool $storageOptSupported = null;
 
     public function __construct(
-        string  $id,
-        string  $workDir,
-        int     $ttl         = 3600,
-        array   $limits      = [],
-        string  $fwChain     = 'DOCKER-USER',
+        string $id,
+        string $workDir,
+        array $config,
         ?string $sessionFlag = null,
-        ?string $envFile     = null
+        ?string $envFile = null,
+        ?string $logFile = null
     ) {
-        $this->id          = $id;
-        $this->workDir     = $workDir;
-        $this->ttl         = $ttl;
-        $this->limits      = $limits;
-        $this->fwChain     = $fwChain;
+        $this->id = $id;
+        $this->workDir = $workDir;
+        $this->ttl = $config['container_ttl_seconds'] ?? 3600;
+        $this->limits = $config['limits'] ?? [];
+        $this->securityOpts = $config['docker_security'] ?? [];
+        $this->fwChain = $config['firewall_chain'] ?? 'DOCKER-USER';
         $this->sessionFlag = $sessionFlag;
-        $this->envFile     = $envFile;
+        $this->envFile = $envFile;
+        $this->logFile = $logFile ?? $workDir . '/exec.log';
+        $this->portRange = $config['port_range'] ?? ['min' => 32768, 'max' => 60999];
     }
 
-    /* ───────────────────────────────────────── core orchestration ───────────────────────────────────────── */
-
+    /**
+     * Build and run containers
+     */
     public function buildAndRun(array $buildInfo): array
     {
+        $this->writeLog("Starting build: {$buildInfo['type']}");
+
         if ($buildInfo['type'] === 'compose') {
             $result = $this->startCompose($buildInfo['path']);
-            $cids   = $this->listComposeContainers();
+            $cids = $this->listComposeContainers();
         } else {
             $result = $this->startDockerfile($buildInfo['path']);
-            $cids   = [$this->id];
+            $cids = [$this->id];
+        }
+
+        if (empty($cids)) {
+            throw new \RuntimeException('No containers started');
         }
 
         $this->applyLimits($cids);
         $this->openPorts($result['ports']);
-        $this->scheduleCleanup($cids, $result['ports']);
+        $this->scheduleCleanup($cids, $result['ports'], $buildInfo['type']);
 
-        /* metadata for /stop.php */
-        file_put_contents($this->workDir . '/meta.json', json_encode([
-            'mode'  => $buildInfo['type'],   // 'compose' | 'single'
-            'ports' => $result['ports']
-        ]));
+        // Save metadata for stop.php
+        $this->saveMeta($buildInfo['type'], $result['ports'], $cids);
 
-        /* ensure caller receives container IDs */
+        $this->writeLog("Build complete. Containers: " . implode(', ', $cids));
+
         return $result + ['containerIds' => $cids];
     }
 
-    /* ───────────────────────────────────────── resource limits ───────────────────────────────────────── */
+    /**
+     * Build security flags for docker run
+     */
+    private function getSecurityFlags(): string
+    {
+        $flags = [];
 
+        // No new privileges
+        if ($this->securityOpts['no_new_privileges'] ?? true) {
+            $flags[] = '--security-opt=no-new-privileges:true';
+        }
+
+        // Read-only root filesystem
+        if ($this->securityOpts['read_only_root'] ?? false) {
+            $flags[] = '--read-only';
+            $flags[] = '--tmpfs /tmp:rw,noexec,nosuid,size=100m';
+        }
+
+        // Drop capabilities
+        $dropCaps = $this->securityOpts['drop_capabilities'] ?? ['ALL'];
+        foreach ($dropCaps as $cap) {
+            $flags[] = '--cap-drop=' . escapeshellarg($cap);
+        }
+
+        // Add specific capabilities
+        $addCaps = $this->securityOpts['add_capabilities'] ?? [];
+        foreach ($addCaps as $cap) {
+            $flags[] = '--cap-add=' . escapeshellarg($cap);
+        }
+
+        // PID limit
+        if (!empty($this->limits['pids'])) {
+            $flags[] = '--pids-limit=' . (int) $this->limits['pids'];
+        }
+
+        return implode(' ', $flags);
+    }
+
+    /**
+     * Apply resource limits to running containers
+     */
     private function applyLimits(array $cids): void
     {
         $flags = [];
 
         if (!empty($this->limits['memory'])) {
             $flags[] = '--memory=' . escapeshellarg($this->limits['memory']);
+            $flags[] = '--memory-swap=' . escapeshellarg($this->limits['memory']); // No swap
         }
 
         if (!empty($this->limits['cpus'])) {
-            $flags[] = '--cpus=' . escapeshellarg($this->limits['cpus']);
-        }
-
-        if (!empty($this->limits['storage']) && $this->storageOptIsSupported()) {
-            $flags[] = '--storage-opt size=' . escapeshellarg($this->limits['storage']);
+            $flags[] = '--cpus=' . escapeshellarg((string) $this->limits['cpus']);
         }
 
         if (!$flags) {
             return;
         }
 
+        $flagStr = implode(' ', $flags);
         foreach ($cids as $cid) {
-            shell_exec(sprintf('docker update %s %s', implode(' ', $flags), escapeshellarg($cid)));
+            $cmd = sprintf('docker update %s %s 2>&1', $flagStr, escapeshellarg($cid));
+            Utils::sh($cmd, $out);
+            if (str_contains($out, 'Error')) {
+                Utils::log('WARN', 'Failed to apply limits', ['cid' => $cid, 'output' => $out]);
+            }
         }
     }
 
-    /** Check once per PHP process whether the Docker storage‑driver supports `--storage-opt size=` */
-    private function storageOptIsSupported(): bool
+    /**
+     * Start containers from docker-compose file
+     */
+    private function startCompose(string $composePath): array
     {
-        if (self::$storageOptSupported !== null) {
-            return self::$storageOptSupported;
-        }
+        $dirPath = dirname($composePath);
+        $project = $this->id;
 
-        $driver = trim(shell_exec('docker info --format "{{.Driver}}" 2>/dev/null') ?: '');
-        self::$storageOptSupported = in_array(
-            $driver,
-            ['overlay2', 'overlay', 'devicemapper', 'fuse-overlayfs'],
-            true
+        // Patch ports to avoid conflicts
+        $patchedPath = $this->patchComposePorts($composePath);
+
+        // Apply security constraints to compose file
+        $patchedPath = $this->patchComposeSecurity($patchedPath);
+
+        $this->writeLog("Pulling images...");
+
+        // Pull images (with timeout)
+        $cmd = sprintf(
+            'cd %s && COMPOSE_HTTP_TIMEOUT=300 docker compose -p %s -f %s pull --quiet 2>&1',
+            escapeshellarg($dirPath),
+            escapeshellarg($project),
+            escapeshellarg($patchedPath)
         );
+        Utils::sh($cmd, $out, $this->logFile, 300);
 
-        return self::$storageOptSupported;
+        $this->writeLog("Building and starting containers...");
+
+        // Build and start
+        $cmd = sprintf(
+            'cd %s && COMPOSE_HTTP_TIMEOUT=600 docker compose -p %s -f %s up -d --build --remove-orphans 2>&1',
+            escapeshellarg($dirPath),
+            escapeshellarg($project),
+            escapeshellarg($patchedPath)
+        );
+        Utils::sh($cmd, $out, $this->logFile, 600);
+
+        // Wait for containers to be ready
+        $this->waitForContainers($project);
+
+        // Collect port mappings
+        $ports = $this->collectComposePorts($project);
+
+        return ['ports' => $ports];
     }
 
-    /* ───────────────────────────────────────── firewall helpers ───────────────────────────────────────── */
-
-    private function openPorts(array $ports): void
+    /**
+     * Wait for compose containers to be running
+     */
+    private function waitForContainers(string $project, int $timeout = 120): void
     {
-        foreach ($ports as $p) {
-            $host = (int) $p['hostPort'];
-            shell_exec(sprintf(
-                'iptables -I %s -p tcp --dport %d -j ACCEPT',
-                escapeshellarg($this->fwChain),
-                $host
-            ));
-        }
-    }
+        $deadline = time() + $timeout;
 
-    private function closePorts(array $ports): void
-    {
-        foreach ($ports as $p) {
-            $host = (int) $p['hostPort'];
-            shell_exec(sprintf(
-                'iptables -D %s -p tcp --dport %d -j ACCEPT',
-                escapeshellarg($this->fwChain),
-                $host
-            ));
-        }
-    }
-
-    /* ───────────────────────────────────────── cleanup timer ───────────────────────────────────────── */
-
-    private function scheduleCleanup(array $cids, array $ports): void
-    {
-        $sec = $this->ttl;
-
-        $downCmd = count($cids) > 1
-            ? 'docker compose -p ' . escapeshellarg($this->id) . ' down -v --remove-orphans'
-            : 'docker rm -fv ' . escapeshellarg($this->id);
-
-        $fw  = '';
-        foreach ($ports as $p) {
-            $fw .= sprintf(
-                'iptables -D %s -p tcp --dport %d -j ACCEPT;',
-                escapeshellarg($this->fwChain),
-                (int) $p['hostPort']
+        while (time() < $deadline) {
+            $cmd = sprintf(
+                'docker compose -p %s ps --format "{{.State}}|{{.Health}}" 2>/dev/null',
+                escapeshellarg($project)
             );
+            Utils::sh($cmd, $out);
+
+            $lines = array_filter(explode("\n", trim($out)));
+            if (empty($lines)) {
+                sleep(2);
+                continue;
+            }
+
+            $allReady = true;
+            foreach ($lines as $line) {
+                $parts = explode('|', $line);
+                $state = $parts[0] ?? '';
+                $health = $parts[1] ?? '';
+
+                if ($state !== 'running') {
+                    $allReady = false;
+                    break;
+                }
+
+                if ($health && !in_array($health, ['healthy', '-', ''], true)) {
+                    $allReady = false;
+                    break;
+                }
+            }
+
+            if ($allReady) {
+                $this->writeLog("All containers running");
+                return;
+            }
+
+            sleep(2);
         }
 
-        $flag = $this->sessionFlag ? 'rm -f ' . escapeshellarg($this->sessionFlag) : '';
-
-        $cmd = sprintf('(sleep %d && %s %s %s) >/dev/null 2>&1 &', $sec, $downCmd, $fw, $flag);
-        shell_exec($cmd);
+        $this->writeLog("Warning: Timeout waiting for containers");
     }
 
-    /* ───────────────────────────────────────── helpers (ports / compose) ───────────────────────────────────────── */
-    private function cx(string $cmd): string
+    /**
+     * Collect port mappings from compose project
+     */
+    private function collectComposePorts(string $project): array
     {
-        return 'COMPOSE_HTTP_TIMEOUT=1200 DOCKER_CLIENT_TIMEOUT=1200 ' . $cmd;
+        $cmd = sprintf(
+            'docker compose -p %s ps --format "{{.Name}}|{{.Publishers}}" 2>/dev/null',
+            escapeshellarg($project)
+        );
+        Utils::sh($cmd, $out);
+
+        $ports = [];
+        foreach (array_filter(explode("\n", trim($out))) as $line) {
+            $parts = explode('|', $line, 2);
+            if (count($parts) !== 2) continue;
+
+            [$service, $publishers] = $parts;
+
+            foreach (preg_split('/,\s*/', $publishers) as $chunk) {
+                if (preg_match('/:(\d+)->(\d+)/', $chunk, $m)) {
+                    $ports[] = [
+                        'service' => $service,
+                        'hostPort' => (int) $m[1],
+                        'containerPort' => (int) $m[2],
+                    ];
+                }
+            }
+        }
+
+        return $ports;
     }
 
-    private function listComposeContainers(): array
+    /**
+     * Patch compose file to use available ports
+     */
+    private function patchComposePorts(string $composePath): string
     {
-        Utils::sh('docker compose -p ' . escapeshellarg($this->id) . ' ps -q', $out);
-        return array_filter(explode("\n", trim($out)));
-    }
-
-    private function patchComposePorts(string $in): string
-    {
-        $data = Yaml::parseFile($in);
-        if (!isset($data['services'])) return $in;
+        $data = Yaml::parseFile($composePath);
+        if (!isset($data['services'])) {
+            return $composePath;
+        }
 
         $changed = false;
+
         foreach ($data['services'] as $svcName => &$svc) {
             if (!isset($svc['ports'])) continue;
-            $newPorts = [];
-            foreach ($svc['ports'] as $map) {
-                if (is_int($map) || is_numeric($map)) {   // format: "80"
-                    $newPorts[] = $map;                   // random host port
-                    continue;
-                }
-                [$host,$cont] = explode(':',$map,2);
-                if (!$this->isPortFree((int)$host)) {
-                    $host = $this->getFreePort();
-                    $changed = true;
-                }
-                $newPorts[] = "$host:$cont";
 
-                /* propagate to .env:   PORT_db=54321  etc. */
-                $this->patchEnvPort($svcName, $host);
+            $newPorts = [];
+            foreach ($svc['ports'] as $mapping) {
+                $newPort = $this->normalizePortMapping($mapping, $svcName, $changed);
+                $newPorts[] = $newPort;
             }
             $svc['ports'] = $newPorts;
         }
         unset($svc);
 
-        if (!$changed) return $in;
+        if (!$changed) {
+            return $composePath;
+        }
 
-        $patched = $this->workDir.'/_compose.ports.yml';
-        file_put_contents($patched, Yaml::dump($data, 99, 2));
-        return $patched;
+        $patchedPath = $this->workDir . '/_compose.patched.yml';
+        file_put_contents($patchedPath, Yaml::dump($data, 99, 2));
+
+        return $patchedPath;
     }
 
+    /**
+     * Normalize a port mapping and allocate free ports
+     */
+    private function normalizePortMapping($mapping, string $svcName, bool &$changed): string
+    {
+        // Handle different formats
+        if (is_int($mapping) || is_numeric($mapping)) {
+            // Just container port - let Docker assign host port
+            return (string) $mapping;
+        }
+
+        $mapping = (string) $mapping;
+
+        // Parse host:container or just container
+        if (str_contains($mapping, ':')) {
+            $parts = explode(':', $mapping, 2);
+            $host = $parts[0];
+            $container = $parts[1];
+
+            // If host port specified and not available, get a free one
+            if (is_numeric($host)) {
+                $hostPort = (int) $host;
+                if (!$this->isPortFree($hostPort)) {
+                    $hostPort = $this->getFreePort();
+                    $changed = true;
+                }
+                $this->patchEnvPort($svcName, $hostPort);
+                return "$hostPort:$container";
+            }
+        }
+
+        return $mapping;
+    }
+
+    /**
+     * Patch compose file with security constraints
+     */
+    private function patchComposeSecurity(string $composePath): string
+    {
+        $data = Yaml::parseFile($composePath);
+        if (!isset($data['services'])) {
+            return $composePath;
+        }
+
+        foreach ($data['services'] as $svcName => &$svc) {
+            // Force bridge network
+            unset($svc['network_mode']);
+
+            // Remove privileged mode
+            unset($svc['privileged']);
+
+            // Remove dangerous capabilities
+            unset($svc['cap_add']);
+
+            // Add resource limits if not present
+            if (!isset($svc['deploy'])) {
+                $svc['deploy'] = [];
+            }
+            if (!isset($svc['deploy']['resources'])) {
+                $svc['deploy']['resources'] = [];
+            }
+            if (!isset($svc['deploy']['resources']['limits'])) {
+                $svc['deploy']['resources']['limits'] = [
+                    'memory' => $this->limits['memory'] ?? '512m',
+                    'cpus' => (string) ($this->limits['cpus'] ?? '0.5'),
+                ];
+            }
+        }
+        unset($svc);
+
+        $patchedPath = str_replace('.yml', '.secure.yml', $composePath);
+        file_put_contents($patchedPath, Yaml::dump($data, 99, 2));
+
+        return $patchedPath;
+    }
+
+    /**
+     * Start container from Dockerfile
+     */
+    private function startDockerfile(string $dockerfilePath): array
+    {
+        $dir = dirname($dockerfilePath);
+        $tag = strtolower($this->id) . ':latest';
+
+        $this->writeLog("Building image from Dockerfile...");
+
+        // Build image
+        $buildCmd = sprintf(
+            'docker build --no-cache -t %s -f %s %s 2>&1',
+            escapeshellarg($tag),
+            escapeshellarg($dockerfilePath),
+            escapeshellarg($dir)
+        );
+
+        $exitCode = Utils::sh($buildCmd, $out, $this->logFile, 600);
+        if ($exitCode !== 0) {
+            throw new \RuntimeException('Docker build failed');
+        }
+
+        $this->writeLog("Starting container...");
+
+        // Build run command
+        $runParts = ['docker run -d'];
+
+        // Publish all exposed ports
+        $runParts[] = '-P';
+
+        // Container name
+        $runParts[] = '--name ' . escapeshellarg($this->id);
+
+        // Resource limits
+        if (!empty($this->limits['memory'])) {
+            $runParts[] = '--memory=' . escapeshellarg($this->limits['memory']);
+            $runParts[] = '--memory-swap=' . escapeshellarg($this->limits['memory']);
+        }
+        if (!empty($this->limits['cpus'])) {
+            $runParts[] = '--cpus=' . escapeshellarg((string) $this->limits['cpus']);
+        }
+
+        // Security options
+        $runParts[] = $this->getSecurityFlags();
+
+        // Restart policy
+        $runParts[] = '--restart=no';
+
+        // Environment file
+        if ($this->envFile && is_file($this->envFile)) {
+            $runParts[] = '--env-file ' . escapeshellarg($this->envFile);
+        }
+
+        // Image
+        $runParts[] = escapeshellarg($tag);
+
+        $runCmd = implode(' ', array_filter($runParts)) . ' 2>&1';
+        $exitCode = Utils::sh($runCmd, $out, $this->logFile, 60);
+
+        if ($exitCode !== 0) {
+            throw new \RuntimeException('Failed to start container: ' . trim($out));
+        }
+
+        // Wait for container to start
+        sleep(2);
+
+        // Get port mappings
+        $ports = $this->getContainerPorts($this->id);
+
+        return ['ports' => $ports];
+    }
+
+    /**
+     * Get port mappings for a container
+     */
+    private function getContainerPorts(string $containerId): array
+    {
+        $cmd = 'docker port ' . escapeshellarg($containerId) . ' 2>/dev/null';
+        Utils::sh($cmd, $out);
+
+        $ports = [];
+        foreach (array_filter(explode("\n", trim($out))) as $line) {
+            // Format: "80/tcp -> 0.0.0.0:32768"
+            if (preg_match('/^(\d+)\/\w+\s*->\s*[\d.]+:(\d+)/', $line, $m)) {
+                $ports[] = [
+                    'service' => $containerId,
+                    'hostPort' => (int) $m[2],
+                    'containerPort' => (int) $m[1],
+                ];
+            }
+        }
+
+        return $ports;
+    }
+
+    /**
+     * List containers in a compose project
+     */
+    private function listComposeContainers(): array
+    {
+        $cmd = sprintf('docker compose -p %s ps -q 2>/dev/null', escapeshellarg($this->id));
+        Utils::sh($cmd, $out);
+
+        return array_filter(explode("\n", trim($out)));
+    }
+
+    /**
+     * Open firewall ports
+     */
+    private function openPorts(array $ports): void
+    {
+        foreach ($ports as $p) {
+            $hostPort = (int) ($p['hostPort'] ?? 0);
+            if ($hostPort <= 0) continue;
+
+            $cmd = sprintf(
+                'iptables -I %s -p tcp --dport %d -j ACCEPT 2>/dev/null',
+                escapeshellarg($this->fwChain),
+                $hostPort
+            );
+            shell_exec($cmd);
+        }
+    }
+
+    /**
+     * Schedule cleanup after TTL expires
+     */
+    private function scheduleCleanup(array $cids, array $ports, string $mode): void
+    {
+        $sec = $this->ttl;
+
+        // Stop command
+        $stopCmd = $mode === 'compose'
+            ? 'docker compose -p ' . escapeshellarg($this->id) . ' down -v --remove-orphans'
+            : 'docker rm -fv ' . escapeshellarg($this->id);
+
+        // Firewall cleanup
+        $fwCmds = '';
+        foreach ($ports as $p) {
+            $fwCmds .= sprintf(
+                'iptables -D %s -p tcp --dport %d -j ACCEPT 2>/dev/null;',
+                escapeshellarg($this->fwChain),
+                (int) ($p['hostPort'] ?? 0)
+            );
+        }
+
+        // Session flag cleanup
+        $flagCmd = $this->sessionFlag ? 'rm -f ' . escapeshellarg($this->sessionFlag) : '';
+
+        // Directory cleanup
+        $dirCmd = 'rm -rf ' . escapeshellarg($this->workDir);
+
+        $fullCmd = sprintf(
+            '(sleep %d && %s; %s %s; %s) >/dev/null 2>&1 &',
+            $sec,
+            $stopCmd,
+            $fwCmds,
+            $flagCmd,
+            $dirCmd
+        );
+
+        shell_exec($fullCmd);
+
+        $this->writeLog("Cleanup scheduled in {$sec}s");
+    }
+
+    /**
+     * Save metadata for stop.php
+     */
+    private function saveMeta(string $mode, array $ports, array $cids): void
+    {
+        $meta = [
+            'mode' => $mode,
+            'ports' => $ports,
+            'containerIds' => $cids,
+            'created' => time(),
+            'ttl' => $this->ttl,
+        ];
+
+        file_put_contents($this->workDir . '/meta.json', json_encode($meta, JSON_PRETTY_PRINT));
+    }
+
+    /**
+     * Check if a port is free
+     */
+    private function isPortFree(int $port): bool
+    {
+        if ($port < $this->portRange['min'] || $port > $this->portRange['max']) {
+            return false;
+        }
+
+        $socket = @socket_create(AF_INET, SOCK_STREAM, SOL_TCP);
+        if (!$socket) return false;
+
+        $result = @socket_bind($socket, '0.0.0.0', $port);
+        socket_close($socket);
+
+        return $result !== false;
+    }
+
+    /**
+     * Get a free port
+     */
+    private function getFreePort(): int
+    {
+        $socket = socket_create(AF_INET, SOCK_STREAM, SOL_TCP);
+        socket_bind($socket, '0.0.0.0', 0);
+        socket_getsockname($socket, $addr, $port);
+        socket_close($socket);
+
+        return $port;
+    }
+
+    /**
+     * Update .env file with port mapping
+     */
     private function patchEnvPort(string $svc, int $hostPort): void
     {
         if (!$this->envFile) return;
 
-        $key = strtoupper($svc).'_PORT';
-        $lines = file_exists($this->envFile)
-            ? file($this->envFile, FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES)
-            : [];
+        $key = strtoupper(preg_replace('/[^a-zA-Z0-9]/', '_', $svc)) . '_PORT';
+
+        $lines = [];
+        if (is_file($this->envFile)) {
+            $lines = file($this->envFile, FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES);
+        }
 
         $found = false;
         foreach ($lines as &$line) {
             if (str_starts_with($line, "$key=")) {
-                $line  = "$key=$hostPort";
+                $line = "$key=$hostPort";
                 $found = true;
                 break;
             }
         }
-        if (!$found) $lines[] = "$key=$hostPort";
+        unset($line);
+
+        if (!$found) {
+            $lines[] = "$key=$hostPort";
+        }
 
         file_put_contents($this->envFile, implode("\n", $lines) . "\n");
     }
 
-    private function getFreePort(): int
+    /**
+     * Write to log file
+     */
+    private function writeLog(string $message): void
     {
-        $s = socket_create(AF_INET, SOCK_STREAM, SOL_TCP);
-        socket_bind($s, '0.0.0.0', 0);
-        socket_getsockname($s, $addr, $port);
-        socket_close($s);
-        return $port;
-    }
-
-    private function isPortFree(int $port): bool
-    {
-        if (!$port) return false;
-        $t = @fsockopen('127.0.0.1', $port);
-        if ($t) { fclose($t); return false; }
-        return true;
-    }
-
-    private function startCompose(string $composePath): array
-    {
-        $dirPath     = dirname($composePath);
-        $project     = $this->id;
-        $patchedPath = $this->patchComposePorts($composePath);
-        $logFile     = $this->workDir . '/exec.log';
-
-        /* 1 ─ pull images that have no build context */
-        Utils::sh(
-            sprintf('cd %s && docker compose -p %s -f %s pull --quiet 2>&1',
-                escapeshellarg($dirPath), escapeshellarg($project), escapeshellarg($patchedPath)),
-            $pullOut,
-            $logFile
-        );
-
-        /* 2 ─ build + up */
-        Utils::sh(
-            sprintf('cd %s && docker compose -p %s -f %s up -d --build 2>&1',
-                escapeshellarg($dirPath), escapeshellarg($project), escapeshellarg($patchedPath)),
-            $upOut,
-            $logFile
-        );
-
-        /* 3 ─ wait until every container is “running” (ignore health if blank) */
-        $deadline = time() + 120;
-        do {
-            Utils::sh(
-                sprintf('docker compose -p %s ps --format "{{.State}}|{{.Health}}"', escapeshellarg($project)),
-                $stateOut
-            );
-            $all = array_filter(explode("\n", trim($stateOut)));
-            $ready = true;
-            foreach ($all as $l) {
-                [$state, $health] = explode('|', $l);
-                if ($state !== 'running') { $ready = false; break; }
-                if ($health && !in_array($health, ['healthy', '-', 'starting'])) { $ready = false; break; }
-            }
-            if ($ready) break;
-            sleep(2);
-        } while (time() < $deadline);
-
-        /* 4 ─ collect host‑ports */
-        Utils::sh(
-            sprintf('docker compose -p %s ps --format "{{.Name}}|{{.Publishers}}"', escapeshellarg($project)),
-            $portLines
-        );
-        $ports = [];
-        foreach (array_filter(explode("\n", trim($portLines))) as $line) {
-            [$svc, $pub] = explode('|', $line);
-            foreach (preg_split('/,\s*/', $pub) as $chunk) {
-                if (preg_match('/:(\d+)->(\d+)/', $chunk, $m)) {
-                    $ports[] = ['service'=>$svc,'hostPort'=>$m[1],'containerPort'=>$m[2]];
-                }
-            }
-        }
-
-        /* 5 ─ container IDs (for metrics) */
-        Utils::sh(
-            sprintf('docker compose -p %s ps -q', escapeshellarg($project)),
-            $cidRaw
-        );
-        $cids = array_filter(explode("\n", trim($cidRaw)));
-
-        /* 6 ─ store meta so /stop.php can cleanly tear down */
-        file_put_contents($this->workDir.'/meta.json', json_encode([
-            'mode'  => 'compose',
-            'ports' => $ports
-        ]));
-
-        return [
-            'ports'        => $ports,
-            'containerIds' => $cids
-        ];
-    }
-
-    private function collect(string $s): \Illuminate\Support\Collection
-    {
-        return new \Illuminate\Support\Collection(
-            array_filter(explode("\n", trim($s)))
-        );
-    }
-
-    private function startDockerfile(string $dockerfilePath): array
-    {
-        $dir     = dirname($dockerfilePath);
-        $tag     = $this->id . ':latest';
-        $logFile = $this->workDir . '/exec.log';
-
-        // build image
-        Utils::sh(
-            sprintf('docker build -t %s -f %s %s 2>&1',
-                escapeshellarg($tag),
-                escapeshellarg($dockerfilePath),
-                escapeshellarg($dir)),
-            $tmp,
-            $logFile
-        );
-
-        // run container with optional .env
-        $envOpt = $this->envFile && is_file($this->envFile)
-            ? '--env-file ' . escapeshellarg($this->envFile)
-            : '';
-
-        Utils::sh(
-            sprintf('docker run -d -P %s --name %s %s 2>&1',
-                $envOpt,
-                escapeshellarg($this->id),
-                escapeshellarg($tag)),
-            $tmp,
-            $logFile
-        );
-
-        // host‑port discovery
-        Utils::sh('docker port ' . escapeshellarg($this->id), $portRaw);
-        $ports = [];
-        foreach (array_filter(explode("\n", trim($portRaw))) as $l) {
-            [$cnPort, $host] = array_map('trim', explode('->', $l));
-            [, $hPort] = explode(':', $host);
-            $ports[] = ['service'=>$this->id,'hostPort'=>$hPort,'containerPort'=>$cnPort];
-        }
-
-        // save meta for /stop.php
-        file_put_contents($this->workDir.'/meta.json', json_encode([
-            'mode'  => 'single',
-            'ports' => $ports
-        ]));
-
-        return [
-            'ports'        => $ports,
-            'containerIds' => [$this->id]
-        ];
+        $timestamp = date('Y-m-d H:i:s');
+        $line = "[$timestamp] $message\n";
+        file_put_contents($this->logFile, $line, FILE_APPEND | LOCK_EX);
     }
 }
