@@ -1,18 +1,8 @@
 {
     "name": "sanix-darker/docka",
-    "description": "Build and deploy any public github / gitlab repo that have Dockerfile or docker-compose.yml",
-    "scripts": {
-      "serve": [
-        "php -d display_errors=1 -d display_startup_errors=1 -d log_errors=1 -d error_reporting=E_ALL -d error_log=php://stdout -S 0.0.0.0:7711 -t public"
-      ]
-    },
+    "description": "Build and deploy any public GitHub/GitLab repo that has a Dockerfile or docker-compose.yml",
     "type": "project",
     "license": "MIT",
-    "autoload": {
-        "psr-4": {
-            "App\\": "src/"
-        }
-    },
     "authors": [
         {
             "name": "sanix-darker",
@@ -20,7 +10,32 @@
         }
     ],
     "require": {
-        "illuminate/collections": "^12.12",
-        "symfony/yaml": "^7.2"
+        "php": ">=8.1",
+        "ext-json": "*",
+        "ext-sockets": "*",
+        "symfony/yaml": "^7.0"
+    },
+    "require-dev": {
+        "phpstan/phpstan": "^1.10"
+    },
+    "autoload": {
+        "psr-4": {
+            "App\\": "src/"
+        }
+    },
+    "scripts": {
+        "serve": [
+            "@php -d display_errors=1 -d display_startup_errors=1 -d log_errors=1 -d error_reporting=E_ALL -d error_log=php://stdout -S 0.0.0.0:7711 -t public"
+        ],
+        "analyze": [
+            "@phpstan analyse src --level=5"
+        ],
+        "cleanup": [
+            "rm -rf builds/* logs/*"
+        ]
+    },
+    "config": {
+        "optimize-autoloader": true,
+        "sort-packages": true
     }
 }

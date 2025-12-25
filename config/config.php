@@ -1,32 +1,109 @@
 <?php
 
-// for debuguing purpose only
-function writeToLog($message) {
-    $logFile = "log.txt";
-    $logMessage = date("Y-m-d H:i:s") . " - " . $message . PHP_EOL;
-    file_put_contents($logFile, $logMessage, FILE_APPEND);
-}
+declare(strict_types=1);
 
-// Am not yet sure about this tho...
+/**
+ * Docka Configuration
+ *
+ * Security-hardened configuration for the container sandbox service.
+ */
+
 return [
-    // absolute path where cloned repos & containers live
+    // PATHS & STORAGE
+    // Absolute path where cloned repos & containers live
     'build_root' => __DIR__ . '/../builds',
-    // how long before we auto-clean old sandboxes
-    'ttl_minutes' => 86400,
-    // running containers G
+
+    // Log file location
+    'log_file' => __DIR__ . '/../logs/docka.log',
+
+    // TIMEOUTS & TTL
+    // How long (minutes) before we auto-clean old sandbox directories
+    'ttl_minutes' => 120,
+
+    // How long (seconds) containers run before auto-termination
     'container_ttl_seconds' => 3600,
 
-    // resources allowed per container...
+    // Git clone timeout in seconds
+    'git_timeout_seconds' => 120,
+
+    // Docker build timeout in seconds
+    'build_timeout_seconds' => 600,
+
+    // RESOURCE LIMITS (per container)
     'limits' => [
-        'memory'  => '1g',   // e.g. '512m', '2g', null = unlimited
-        'cpus'    => '1',   // 0.5 CPU ⇒ 50 % of 1 core
-        // FIXME: will still investigate why this does no work properly
-        //'storage' => '1G',     // 1 GiB writable layer (needs devicemapper or fuse-overlayfs)
+        'memory'      => '512m',    // e.g. '512m', '1g', null = unlimited
+        'cpus'        => '0.5',     // 0.5 CPU ⇒ 50% of 1 core
+        'pids'        => 100,       // Max processes inside container
+        'network_mode'=> 'bridge',  // bridge, none, host (host is dangerous!)
     ],
 
-    // maybe INPUT only for --network host ?
+    // RATE LIMITING
+    'rate_limit' => [
+        // Per-IP rate limiting
+        'builds_per_ip_per_hour'    => 10,
+        'builds_per_ip_per_minute'  => 3,
+
+        // Global rate limiting
+        'max_concurrent_builds'     => 5,
+
+        // Session-based limits
+        'max_per_session'           => 3,
+
+        // Rate limit storage (file-based for simplicity)
+        'storage_path'              => __DIR__ . '/../builds/.ratelimit',
+    ],
+
+    // SECURITY
+    // Firewall chain for port rules
     'firewall_chain' => 'DOCKER-USER',
 
-    // max container per on the php session opened
-    'max_per_session'       => 30,
+    // Allowed git hosts (empty array = allow all)
+    'allowed_hosts' => [
+        'github.com',
+        'gitlab.com',
+        'bitbucket.org',
+    ],
+
+    // Blocked patterns in repository URLs
+    'blocked_url_patterns' => [
+        '/\.\./',           // Path traversal
+        '/[;&|`$]/',        // Shell injection chars
+        '/\s/',             // Whitespace
+    ],
+
+    // Docker security options
+    'docker_security' => [
+        'no_new_privileges' => true,
+        'read_only_root'    => false,  // Some apps need writable root
+        'drop_capabilities' => ['ALL'],
+        'add_capabilities'  => ['CHOWN', 'SETUID', 'SETGID', 'NET_BIND_SERVICE'],
+    ],
+
+    // Blocked Dockerfile instructions (security risk)
+    'blocked_dockerfile_patterns' => [
+        '/--privileged/i',
+        '/--cap-add\s+ALL/i',
+        '/--network\s+host/i',
+    ],
+
+    // PORT ALLOCATION
+    'port_range' => [
+        'min' => 32768,
+        'max' => 60999,
+    ],
+
+    // LOGGING
+    'logging' => [
+        'enabled'       => true,
+        'level'         => 'INFO',  // DEBUG, INFO, WARN, ERROR
+        'max_file_size' => 10485760, // 10MB
+        'max_files'     => 5,
+    ],
+
+    // CSRF PROTECTION
+    'csrf' => [
+        'enabled'     => true,
+        'token_name'  => '_csrf_token',
+        'token_ttl'   => 3600,
+    ],
 ];
