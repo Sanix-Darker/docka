@@ -40,14 +40,14 @@ return [
     // RATE LIMITING
     'rate_limit' => [
         // Per-IP rate limiting
-        'builds_per_ip_per_hour'    => 10,
-        'builds_per_ip_per_minute'  => 3,
+        'builds_per_ip_per_hour'    => 4, // 10 for dev
+        'builds_per_ip_per_minute'  => 1, // 3 for dev
 
         // Global rate limiting
-        'max_concurrent_builds'     => 5,
+        'max_concurrent_builds'     => 3, // 5 for dev
 
         // Session-based limits
-        'max_per_session'           => 3,
+        'max_per_session'           => 1, // 3 for dev
 
         // Rate limit storage (file-based for simplicity)
         'storage_path'              => __DIR__ . '/../builds/.ratelimit',
@@ -95,7 +95,7 @@ return [
     // LOGGING
     'logging' => [
         'enabled'       => true,
-        'level'         => 'INFO',  // DEBUG, INFO, WARN, ERROR
+        'level'         => 'DEBUG',  // DEBUG, INFO, WARN, ERROR
         'max_file_size' => 10485760, // 10MB
         'max_files'     => 5,
     ],

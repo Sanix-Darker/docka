@@ -37,7 +37,7 @@ class RepositoryManager
 
         // Only allow safe characters in refs
         $ref = trim($ref);
-        if (!preg_match('/^[a-zA-Z0-9._\/-]+$/', $ref)) {
+        if (!preg_match('#^[a-zA-Z0-9./_-]+$#', $ref)) {
             throw new \InvalidArgumentException('Invalid git ref format');
         }
 
@@ -75,13 +75,12 @@ class RepositoryManager
             mkdir($parent, 0755, true);
         }
 
-        // Build clone command with security options
+        // Convert SSH URLs to HTTPS
+        $cloneUrl = $this->convertToHttps($this->repoUrl);
+        // Build clone command - NO timeout here, Utils::sh handles it
         $timeout = $this->config['git_timeout_seconds'] ?? 120;
 
-        $cmd = sprintf(
-            'GIT_TERMINAL_PROMPT=0 timeout %d git clone --depth 1 --single-branch',
-            $timeout
-        );
+        $cmd = 'GIT_TERMINAL_PROMPT=0 git clone --depth 1 --single-branch';
 
         if ($this->ref) {
             $cmd .= ' --branch ' . escapeshellarg($this->ref);
@@ -89,15 +88,16 @@ class RepositoryManager
 
         $cmd .= sprintf(
             ' %s %s 2>&1',
-            escapeshellarg($this->repoUrl),
+            escapeshellarg($cloneUrl),
             escapeshellarg($this->workDir)
         );
 
-        Utils::sh($cmd, $out, null, $timeout + 10);
+        Utils::sh($cmd, $out, null, $timeout);
 
         if (!is_dir($this->workDir)) {
-            Utils::log('ERROR', 'Clone failed', ['output' => $out]);
-            throw new \RuntimeException("Clone failed: " . $this->truncateOutput($out));
+            Utils::log('ERROR', "Clone failed : '$cmd'", ['output' => $out]);
+            $sanitizedError = $this->sanitizeCloneError($out);
+            throw new \RuntimeException("Clone failed: " . $sanitizedError);
         }
 
         // Security: Remove .git directory to save space and prevent issues
@@ -283,6 +283,45 @@ class RepositoryManager
             return substr($output, 0, $maxLength) . '...';
         }
         return $output;
+    }
+
+    /**
+     * Convert SSH git URLs to HTTPS
+     */
+    private function convertToHttps(string $url): string
+    {
+        // Convert git@github.com:user/repo.git to https://github.com/user/repo.git
+        if (preg_match('#^git@([^:]+):(.+)$#', $url, $matches)) {
+            $host = $matches[1];
+            $path = $matches[2];
+            return "https://{$host}/{$path}";
+        }
+
+        // Convert git://github.com/user/repo.git to https://github.com/user/repo.git
+        if (str_starts_with($url, 'git://')) {
+            return preg_replace('#^git://#', 'https://', $url);
+        }
+
+        return $url;
+    }
+
+    /**
+     * Sanitize clone error message - remove sensitive paths
+     */
+    private function sanitizeCloneError(string $output): string
+    {
+        // Remove "Cloning into '...'" line with full path
+        $output = preg_replace("#Cloning into '[^']+'\.\.\.\s*#", '', $output);
+
+        // Remove any remaining full paths
+        $output = preg_replace('#/[^\s]+/builds/[^\s]+#', '[sandbox]', $output);
+        $output = preg_replace('#/home/[^\s]+#', '[path]', $output);
+        $output = preg_replace('#/var/www/[^\s]+#', '[path]', $output);
+
+        $output = trim($output);
+
+        // Return truncated
+        return $this->truncateOutput($output);
     }
 
     /**

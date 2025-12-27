@@ -84,8 +84,14 @@ class Utils
      */
     public static function shortId(int $length = 12): string
     {
-        $bytes = random_bytes((int) ceil($length * 3 / 4));
-        return substr(strtr(base64_encode($bytes), '+/', '-_'), 0, $length);
+        // Use only lowercase alphanumeric (valid for Docker tags)
+        $chars = 'abcdefghijklmnopqrstuvwxyz0123456789';
+        $id = '';
+        $bytes = random_bytes($length);
+        for ($i = 0; $i < $length; $i++) {
+            $id .= $chars[ord($bytes[$i]) % strlen($chars)];
+        }
+        return $id;
     }
 
     /**
@@ -103,10 +109,14 @@ class Utils
             2 => ['pipe', 'w'],
         ];
 
-        // Wrap command with timeout
-        $wrappedCmd = $timeout > 0
-            ? sprintf('timeout %d %s', $timeout, $cmd)
-            : $cmd;
+        // Check if timeout command exists, otherwise run without it
+        $hasTimeout = shell_exec('which timeout 2>/dev/null') !== null;
+
+        if ($hasTimeout && $timeout > 0) {
+            $wrappedCmd = sprintf('timeout %d bash -c %s', $timeout, escapeshellarg($cmd));
+        } else {
+            $wrappedCmd = $cmd;
+        }
 
         $process = proc_open($wrappedCmd, $descriptors, $pipes);
 
@@ -217,7 +227,7 @@ class Utils
      */
     public static function sanitizeId(string $input): string
     {
-        return preg_replace('/[^a-zA-Z0-9_.-]/', '', $input);
+        return preg_replace('/[^a-zA-Z0-9.-]/', '', $input);
     }
 
     /**
@@ -246,14 +256,23 @@ class Utils
     }
 
     /**
-     * Generate CSRF token
+     * Generate CSRF token - reuses existing valid token
      */
-    public static function generateCsrfToken(): string
+    public static function generateCsrfToken(int $ttl = 3600): string
     {
         if (session_status() !== PHP_SESSION_ACTIVE) {
             session_start();
         }
 
+        // Reuse existing token if still valid
+        $storedToken = $_SESSION['_csrf_token'] ?? '';
+        $storedTime = $_SESSION['_csrf_time'] ?? 0;
+
+        if (!empty($storedToken) && (time() - $storedTime) < $ttl) {
+            return $storedToken;
+        }
+
+        // Generate new token
         $token = bin2hex(random_bytes(32));
         $_SESSION['_csrf_token'] = $token;
         $_SESSION['_csrf_time'] = time();

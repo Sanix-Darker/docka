@@ -47,15 +47,15 @@ class DockerManager
     /**
      * Build and run containers
      */
-    public function buildAndRun(array $buildInfo): array
+    public function buildAndRun(array $buildInfo, ?callable $heartbeat = null): array
     {
         $this->writeLog("Starting build: {$buildInfo['type']}");
 
         if ($buildInfo['type'] === 'compose') {
-            $result = $this->startCompose($buildInfo['path']);
+            $result = $this->startCompose($buildInfo['path'], $heartbeat);
             $cids = $this->listComposeContainers();
         } else {
-            $result = $this->startDockerfile($buildInfo['path']);
+            $result = $this->startDockerfile($buildInfo['path'], $heartbeat);
             $cids = [$this->id];
         }
 
@@ -73,6 +73,88 @@ class DockerManager
         $this->writeLog("Build complete. Containers: " . implode(', ', $cids));
 
         return $result + ['containerIds' => $cids];
+    }
+
+    /**
+     * Run a command with periodic heartbeat callbacks
+     * Streams output to log file and calls heartbeat every few seconds
+     */
+    private function runWithHeartbeat(string $cmd, ?callable $heartbeat, int $timeout = 600): int
+    {
+        $descriptors = [
+            0 => ['pipe', 'r'],  // stdin
+            1 => ['pipe', 'w'],  // stdout
+            2 => ['pipe', 'w'],  // stderr
+        ];
+
+        $process = proc_open($cmd, $descriptors, $pipes);
+
+        if (!is_resource($process)) {
+            return -1;
+        }
+
+        fclose($pipes[0]); // Close stdin
+
+        // Set non-blocking
+        stream_set_blocking($pipes[1], false);
+        stream_set_blocking($pipes[2], false);
+
+        $startTime = time();
+        $lastHeartbeat = time();
+        $output = '';
+
+        while (true) {
+            $status = proc_get_status($process);
+
+            // Read available output
+            $stdout = stream_get_contents($pipes[1]);
+            $stderr = stream_get_contents($pipes[2]);
+
+            if ($stdout) {
+                $output .= $stdout;
+                $this->writeLog(trim($stdout));
+            }
+            if ($stderr) {
+                $output .= $stderr;
+                $this->writeLog(trim($stderr));
+            }
+
+            // Send heartbeat every 2 seconds
+            if ($heartbeat && (time() - $lastHeartbeat) >= 2) {
+                $heartbeat();
+                $lastHeartbeat = time();
+            }
+
+            // Check if process finished
+            if (!$status['running']) {
+                break;
+            }
+
+            // Check timeout
+            if ((time() - $startTime) > $timeout) {
+                proc_terminate($process, 9);
+                fclose($pipes[1]);
+                fclose($pipes[2]);
+                proc_close($process);
+                return -1;
+            }
+
+            // Small sleep to avoid busy loop
+            usleep(100000); // 100ms
+        }
+
+        // Read any remaining output
+        $stdout = stream_get_contents($pipes[1]);
+        $stderr = stream_get_contents($pipes[2]);
+        if ($stdout) $this->writeLog(trim($stdout));
+        if ($stderr) $this->writeLog(trim($stderr));
+
+        fclose($pipes[1]);
+        fclose($pipes[2]);
+
+        $exitCode = proc_close($process);
+
+        return $exitCode;
     }
 
     /**
@@ -146,7 +228,7 @@ class DockerManager
     /**
      * Start containers from docker-compose file
      */
-    private function startCompose(string $composePath): array
+    private function startCompose(string $composePath, ?callable $heartbeat = null): array
     {
         $dirPath = dirname($composePath);
         $project = $this->id;
@@ -158,6 +240,7 @@ class DockerManager
         $patchedPath = $this->patchComposeSecurity($patchedPath);
 
         $this->writeLog("Pulling images...");
+        if ($heartbeat) $heartbeat();
 
         // Pull images (with timeout)
         $cmd = sprintf(
@@ -166,9 +249,10 @@ class DockerManager
             escapeshellarg($project),
             escapeshellarg($patchedPath)
         );
-        Utils::sh($cmd, $out, $this->logFile, 300);
+        $this->runWithHeartbeat($cmd, $heartbeat, 300);
 
         $this->writeLog("Building and starting containers...");
+        if ($heartbeat) $heartbeat();
 
         // Build and start
         $cmd = sprintf(
@@ -177,10 +261,11 @@ class DockerManager
             escapeshellarg($project),
             escapeshellarg($patchedPath)
         );
-        Utils::sh($cmd, $out, $this->logFile, 600);
+        $this->runWithHeartbeat($cmd, $heartbeat, 600);
 
         // Wait for containers to be ready
         $this->waitForContainers($project);
+        if ($heartbeat) $heartbeat();
 
         // Collect port mappings
         $ports = $this->collectComposePorts($project);
@@ -381,14 +466,14 @@ class DockerManager
     /**
      * Start container from Dockerfile
      */
-    private function startDockerfile(string $dockerfilePath): array
+    private function startDockerfile(string $dockerfilePath, ?callable $heartbeat = null): array
     {
         $dir = dirname($dockerfilePath);
         $tag = strtolower($this->id) . ':latest';
 
         $this->writeLog("Building image from Dockerfile...");
 
-        // Build image
+        // Build image with streaming output
         $buildCmd = sprintf(
             'docker build --no-cache -t %s -f %s %s 2>&1',
             escapeshellarg($tag),
@@ -396,12 +481,19 @@ class DockerManager
             escapeshellarg($dir)
         );
 
-        $exitCode = Utils::sh($buildCmd, $out, $this->logFile, 600);
+        $exitCode = $this->runWithHeartbeat($buildCmd, $heartbeat, 600);
         if ($exitCode !== 0) {
-            throw new \RuntimeException('Docker build failed');
+            $this->writeLog("Docker build failed with exit code: $exitCode");
+            Utils::log('ERROR', 'Docker build failed', [
+                'exitCode' => $exitCode,
+                'dockerfile' => $dockerfilePath,
+            ]);
+            throw new \RuntimeException('Docker build failed. Check logs for details.');
         }
 
         $this->writeLog("Starting container...");
+
+        if ($heartbeat) $heartbeat();
 
         // Build run command
         $runParts = ['docker run -d'];

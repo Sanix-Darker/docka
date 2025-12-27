@@ -4,3 +4,4 @@
 /builds/*
 /logs/
 /public/log.txt
+.phpactor.json

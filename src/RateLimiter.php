@@ -93,13 +93,23 @@ class RateLimiter
         $lockFile = $this->storagePath . '/concurrent.lock';
         $countFile = $this->storagePath . '/concurrent.count';
 
-        $fp = fopen($lockFile, 'c');
-        if (!flock($fp, LOCK_SH)) {
-            fclose($fp);
+        // Ensure directory exists
+        if (!is_dir($this->storagePath)) {
+            mkdir($this->storagePath, 0755, true);
+        }
+
+        // Return 0 if count file doesn't exist yet
+        if (!file_exists($countFile)) {
             return 0;
         }
 
-        $count = (int) @file_get_contents($countFile);
+        $fp = fopen($lockFile, 'c');
+        if (!$fp || !flock($fp, LOCK_SH)) {
+            if ($fp) fclose($fp);
+            return 0;
+        }
+
+        $count = file_exists($countFile) ? (int) file_get_contents($countFile) : 0;
 
         flock($fp, LOCK_UN);
         fclose($fp);
@@ -128,13 +138,18 @@ class RateLimiter
         $lockFile = $this->storagePath . '/concurrent.lock';
         $countFile = $this->storagePath . '/concurrent.count';
 
+        // Ensure directory exists
+        if (!is_dir($this->storagePath)) {
+            mkdir($this->storagePath, 0755, true);
+        }
+
         $fp = fopen($lockFile, 'c');
-        if (!flock($fp, LOCK_EX)) {
-            fclose($fp);
+        if (!$fp || !flock($fp, LOCK_EX)) {
+            if ($fp) fclose($fp);
             return;
         }
 
-        $count = (int) @file_get_contents($countFile);
+        $count = file_exists($countFile) ? (int) file_get_contents($countFile) : 0;
         $count = max(0, $count + $delta);
         file_put_contents($countFile, (string) $count);
 

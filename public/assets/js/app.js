@@ -17,6 +17,7 @@ const CONFIG = Object.freeze({
     STORAGE_KEY_PREFIX: 'docka_',
     ENDPOINTS: {
         build: '/build.php',
+        stream: '/stream.php',
         stop: '/stop.php',
         stats: '/stats.php',
         tail: '/tail.php',
@@ -170,23 +171,116 @@ const Storage = {
 
 const API = {
     /**
-     * Submit a build request
+     * Submit a build request using SSE for progress streaming
      * @param {FormData} formData
+     * @param {function(string, string): void} onProgress - Callback for progress updates (stage, message)
      * @returns {Promise<{ok: boolean, error?: string, sandboxId?: string, ports?: Array, containerIds?: string[]}>}
      */
-    async build(formData) {
-        const response = await fetch(CONFIG.ENDPOINTS.build, {
-            method: 'POST',
-            body: formData,
-            credentials: 'same-origin',
-        });
-
-        const text = await response.text();
+    async build(formData, onProgress = null) {
         try {
-            return JSON.parse(text);
+            // Step 1: Get build token from build.php
+            const tokenResponse = await fetch(CONFIG.ENDPOINTS.build, {
+                method: 'POST',
+                body: formData,
+                credentials: 'same-origin',
+            });
+
+            const tokenText = await tokenResponse.text();
+            let tokenData;
+            try {
+                tokenData = JSON.parse(tokenText);
+            } catch (e) {
+                console.error('[API] Invalid token response:', tokenText);
+                return { ok: false, error: 'Server error: ' + (tokenText.substring(0, 100) || 'Empty response') };
+            }
+
+            if (!tokenData.ok) {
+                return tokenData;
+            }
+
+            // Step 2: Open SSE connection to stream.php
+            return new Promise((resolve) => {
+                const streamUrl = tokenData.streamUrl || `stream.php?token=${tokenData.token}`;
+                const eventSource = new EventSource(streamUrl, { withCredentials: true });
+
+                let timeoutId = setTimeout(() => {
+                    eventSource.close();
+                    resolve({ ok: false, error: 'Build timed out (5 minutes)' });
+                }, 300000); // 5 minute timeout
+
+                eventSource.addEventListener('connected', (e) => {
+                    console.log('[SSE] Connected:', e.data);
+                });
+
+                eventSource.addEventListener('progress', (e) => {
+                    try {
+                        const data = JSON.parse(e.data);
+                        console.log('[SSE] Progress:', data);
+                        if (onProgress) {
+                            onProgress(data.stage, data.message);
+                        }
+                    } catch (err) {
+                        console.warn('[SSE] Invalid progress data:', e.data);
+                    }
+                });
+
+                eventSource.addEventListener('complete', (e) => {
+                    clearTimeout(timeoutId);
+                    eventSource.close();
+                    try {
+                        const data = JSON.parse(e.data);
+                        console.log('[SSE] Complete:', data);
+                        resolve(data);
+                    } catch (err) {
+                        console.error('[SSE] Invalid complete data:', e.data);
+                        resolve({ ok: false, error: 'Invalid response from server' });
+                    }
+                });
+
+                eventSource.addEventListener('error', (e) => {
+                    clearTimeout(timeoutId);
+                    // Check if it's an error event with data
+                    if (e.data) {
+                        try {
+                            const data = JSON.parse(e.data);
+                            console.error('[SSE] Error event:', data);
+                            eventSource.close();
+                            resolve({ ok: false, error: data.message || 'Build failed' });
+                            return;
+                        } catch (err) {
+                            // Not JSON, continue to generic error handling
+                        }
+                    }
+
+                    // Generic error (connection lost, etc.)
+                    if (eventSource.readyState === EventSource.CLOSED) {
+                        console.error('[SSE] Connection closed');
+                        resolve({ ok: false, error: 'Connection to server lost' });
+                    }
+                });
+
+                eventSource.addEventListener('done', (e) => {
+                    clearTimeout(timeoutId);
+                    eventSource.close();
+                    console.log('[SSE] Done');
+                });
+
+                // Handle generic error events (connection errors)
+                eventSource.onerror = (e) => {
+                    // Only handle if not already closed by another handler
+                    if (eventSource.readyState === EventSource.CONNECTING) {
+                        console.log('[SSE] Reconnecting...');
+                    } else if (eventSource.readyState === EventSource.CLOSED) {
+                        clearTimeout(timeoutId);
+                        console.error('[SSE] Connection failed');
+                        resolve({ ok: false, error: 'Failed to connect to build stream' });
+                    }
+                };
+            });
+
         } catch (e) {
-            console.error('[API] Invalid JSON response:', text);
-            return { ok: false, error: 'Server error: ' + (text.substring(0, 100) || 'Empty response') };
+            console.error('[API] Build error:', e);
+            return { ok: false, error: 'Network error: ' + e.message };
         }
     },
 
@@ -199,7 +293,14 @@ const API = {
         const response = await fetch(`${CONFIG.ENDPOINTS.stop}?sid=${encodeURIComponent(sid)}`, {
             credentials: 'same-origin',
         });
-        return response.json();
+
+        const text = await response.text();
+        try {
+            return JSON.parse(text);
+        } catch (e) {
+            console.error('[API] Invalid JSON response:', text);
+            return { ok: false, error: 'Server error' };
+        }
     },
 
     /**
@@ -212,7 +313,13 @@ const API = {
             cache: 'no-store',
             credentials: 'same-origin',
         });
-        return response.json();
+
+        const text = await response.text();
+        try {
+            return JSON.parse(text);
+        } catch (e) {
+            return { cpu: null, mem: null, running: false };
+        }
     },
 
     /**
@@ -228,7 +335,13 @@ const API = {
         );
         if (response.status === 204) return null;
         if (!response.ok) return null;
-        return response.json();
+
+        const text = await response.text();
+        try {
+            return JSON.parse(text);
+        } catch (e) {
+            return null;
+        }
     },
 };
 
@@ -644,12 +757,19 @@ class App {
         // Create card immediately for visual feedback
         const tempId = `temp_${Date.now()}`;
         const card = new SandboxCard(tempId, this.sandboxesContainer);
-        card.setStatus('Building...', 'building');
+        card.setStatus('Initializing...', 'building');
         card.appendLog(['Starting build...']);
 
         try {
             const formData = new FormData(this.form);
-            const result = await API.build(formData);
+
+            // Progress callback to update UI during build
+            const onProgress = (stage, message) => {
+                card.setStatus(message, 'building');
+                card.appendLog([`[${stage}] ${message}`]);
+            };
+
+            const result = await API.build(formData, onProgress);
 
             if (!result.ok) {
                 throw new Error(result.error || 'Build failed');

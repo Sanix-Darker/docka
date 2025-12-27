@@ -10,8 +10,8 @@ use App\Utils;
 
 $config = require __DIR__ . '/../config/config.php';
 
-// Generate CSRF token
-$csrfToken = Utils::generateCsrfToken();
+// Generate CSRF token (reuses existing if valid)
+$csrfToken = Utils::generateCsrfToken($config['csrf']['token_ttl'] ?? 3600);
 
 // Get rate limit info for display
 $rateLimiter = new \App\RateLimiter($config);
@@ -64,9 +64,8 @@ $remaining = $rateLimiter->getRemaining($clientIp, 'build_hour', $config['rate_l
                             type="text"
                             id="ref"
                             name="ref"
-                            value="main"
+                            value="master"
                             placeholder="main, master, v1.0.0"
-                            pattern="[a-zA-Z0-9._/-]+"
                         >
                     </div>
                 </div>

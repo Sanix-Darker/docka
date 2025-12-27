@@ -231,6 +231,22 @@ Docka requires root privileges for:
 - iptables manipulation
 - Binding to ports < 1024
 
+```bash
+# Add www-data to docker group
+sudo usermod -aG docker www-data
+
+# Restart PHP-FPM (or Apache/Nginx) to apply group changes
+sudo systemctl restart php-fpm
+# OR if using Apache
+sudo systemctl restart apache2
+# OR if using built-in PHP server, just restart it
+
+----
+# also,
+# Make socket accessible
+sudo chmod 666 /var/run/docker.sock
+```
+
 ## Development
 
 ```bash
@@ -254,8 +270,8 @@ Contributions are welcome! Please:
 
 ## License
 
-MIT License - See [LICENSE](LICENSE) for details.
+MIT License
 
-## Author
+## AUTHOR
 
-Made with ❤️ by [sanixdk](https://github.com/sanix-darker)
+by [sanixdk](https://github.com/sanix-darker)

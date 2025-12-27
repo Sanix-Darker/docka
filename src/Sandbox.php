@@ -101,17 +101,43 @@ class Sandbox
      */
     public function run(): array
     {
+        return $this->runWithProgress(null);
+    }
+
+    /**
+     * Run the sandbox with progress callback for SSE streaming
+     *
+     * @param callable|null $onProgress Callback: function(string $stage, string $message): bool
+     *                                  Return false to abort
+     * @param callable|null $heartbeat  Simple heartbeat callback for long operations
+     * @return array
+     */
+    public function runWithProgress(?callable $onProgress, ?callable $heartbeat = null): array
+    {
+        $progress = function(string $stage, string $message) use ($onProgress): void {
+            if ($onProgress !== null) {
+                $continue = $onProgress($stage, $message);
+                if ($continue === false) {
+                    throw new \RuntimeException('Build cancelled by client');
+                }
+            }
+        };
+
         try {
             // Create work directory
-            if (!mkdir($this->workDir, 0755, true)) {
+            if (!is_dir($this->workDir) && !mkdir($this->workDir, 0755, true)) {
                 throw new \RuntimeException('Failed to create work directory');
             }
 
             // Initialize log file
             file_put_contents($this->logFile, "=== Build started at " . date('Y-m-d H:i:s') . " ===\n");
 
+            $progress('cloning', 'Cloning repository...');
+
             // Clone repository
             $this->repo->clone();
+
+            $progress('validating', 'Validating repository contents...');
 
             // Prepare environment file
             $this->prepareEnvFile();
@@ -130,8 +156,12 @@ class Sandbox
                 FILE_APPEND
             );
 
-            // Build and run containers
-            $result = $this->docker->buildAndRun($buildInfo);
+            $progress('building', 'Building Docker image...');
+
+            // Build and run containers - pass heartbeat for long operations
+            $result = $this->docker->buildAndRun($buildInfo, $heartbeat);
+
+            $progress('starting', 'Starting containers...');
 
             // Mark sandbox as running
             file_put_contents($this->sessionFile, json_encode([
@@ -150,6 +180,8 @@ class Sandbox
                 'ports' => $result['ports'],
                 'containers' => $result['containerIds'],
             ]);
+
+            $progress('complete', 'Build complete!');
 
             return $result;
 
