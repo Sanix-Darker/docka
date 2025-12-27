@@ -267,8 +267,17 @@ class DockerManager
         $this->waitForContainers($project);
         if ($heartbeat) $heartbeat();
 
+        // Brief delay to ensure ports are fully assigned
+        sleep(2);
+
+        $this->writeLog("Collecting port mappings for project: $project");
+
         // Collect port mappings
         $ports = $this->collectComposePorts($project);
+
+        if (empty($ports)) {
+            $this->writeLog("Warning: No ports collected for compose project");
+        }
 
         return ['ports' => $ports];
     }
@@ -326,11 +335,13 @@ class DockerManager
      */
     private function collectComposePorts(string $project): array
     {
+        // Method 1: Try docker compose ps
         $cmd = sprintf(
-            'docker compose -p %s ps --format "{{.Name}}|{{.Publishers}}" 2>/dev/null',
+            'docker compose -p %s ps --format "{{.Name}}|{{.Publishers}}" 2>&1',
             escapeshellarg($project)
         );
         Utils::sh($cmd, $out);
+        $this->writeLog("Compose ps output: " . trim($out));
 
         $ports = [];
         foreach (array_filter(explode("\n", trim($out))) as $line) {
@@ -339,8 +350,9 @@ class DockerManager
 
             [$service, $publishers] = $parts;
 
+            // Match patterns like: 0.0.0.0:32768->80/tcp or :::32768->80/tcp
             foreach (preg_split('/,\s*/', $publishers) as $chunk) {
-                if (preg_match('/:(\d+)->(\d+)/', $chunk, $m)) {
+                if (preg_match('/(\d+)->(\d+)/', $chunk, $m)) {
                     $ports[] = [
                         'service' => $service,
                         'hostPort' => (int) $m[1],
@@ -349,6 +361,66 @@ class DockerManager
                 }
             }
         }
+
+        // Method 2: Fallback - use docker ps to get ports for project containers
+        if (empty($ports)) {
+            $this->writeLog("No ports from compose ps, trying docker ps fallback...");
+
+            $cmd = sprintf(
+                'docker ps --filter "label=com.docker.compose.project=%s" --format "{{.Names}}|{{.Ports}}" 2>&1',
+                escapeshellarg($project)
+            );
+            Utils::sh($cmd, $out);
+            $this->writeLog("Docker ps output: " . trim($out));
+
+            foreach (array_filter(explode("\n", trim($out))) as $line) {
+                $parts = explode('|', $line, 2);
+                if (count($parts) !== 2) continue;
+
+                [$service, $portStr] = $parts;
+
+                // Match patterns like: 0.0.0.0:32768->80/tcp
+                if (preg_match_all('/(\d+)->(\d+)/', $portStr, $matches, PREG_SET_ORDER)) {
+                    foreach ($matches as $m) {
+                        $ports[] = [
+                            'service' => $service,
+                            'hostPort' => (int) $m[1],
+                            'containerPort' => (int) $m[2],
+                        ];
+                    }
+                }
+            }
+        }
+
+        // Method 3: Last resort - use docker port for each container
+        if (empty($ports)) {
+            $this->writeLog("Trying docker port fallback...");
+            $cids = $this->listComposeContainers();
+
+            foreach ($cids as $cid) {
+                $cmd = sprintf('docker port %s 2>&1', escapeshellarg($cid));
+                Utils::sh($cmd, $out);
+                $this->writeLog("Docker port for $cid: " . trim($out));
+
+                // Get container name
+                $nameCmd = sprintf('docker inspect --format "{{.Name}}" %s 2>/dev/null', escapeshellarg($cid));
+                Utils::sh($nameCmd, $name);
+                $serviceName = ltrim(trim($name), '/');
+
+                // Parse output like: 80/tcp -> 0.0.0.0:32768
+                foreach (explode("\n", trim($out)) as $line) {
+                    if (preg_match('/(\d+)\/\w+\s*->\s*[\d.:]+:(\d+)/', $line, $m)) {
+                        $ports[] = [
+                            'service' => $serviceName,
+                            'hostPort' => (int) $m[2],
+                            'containerPort' => (int) $m[1],
+                        ];
+                    }
+                }
+            }
+        }
+
+        $this->writeLog("Collected ports: " . json_encode($ports));
 
         return $ports;
     }
@@ -360,29 +432,40 @@ class DockerManager
     {
         $data = Yaml::parseFile($composePath);
         if (!isset($data['services'])) {
+            $this->writeLog("Warning: No services found in compose file");
             return $composePath;
         }
+
+        $this->writeLog("Services found: " . implode(', ', array_keys($data['services'])));
 
         $changed = false;
 
         foreach ($data['services'] as $svcName => &$svc) {
-            if (!isset($svc['ports'])) continue;
+            if (!isset($svc['ports'])) {
+                $this->writeLog("Service $svcName has no ports defined");
+                continue;
+            }
+
+            $this->writeLog("Service $svcName ports: " . json_encode($svc['ports']));
 
             $newPorts = [];
             foreach ($svc['ports'] as $mapping) {
                 $newPort = $this->normalizePortMapping($mapping, $svcName, $changed);
                 $newPorts[] = $newPort;
+                $this->writeLog("Port mapping: $mapping -> $newPort");
             }
             $svc['ports'] = $newPorts;
         }
         unset($svc);
 
         if (!$changed) {
+            $this->writeLog("No port changes needed");
             return $composePath;
         }
 
         $patchedPath = $this->workDir . '/_compose.patched.yml';
         file_put_contents($patchedPath, Yaml::dump($data, 99, 2));
+        $this->writeLog("Patched compose file written to: $patchedPath");
 
         return $patchedPath;
     }
